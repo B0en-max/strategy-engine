@@ -24,30 +24,28 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 
 ## 3. 当前开发阶段
 
-**Stage 07 — 交易记录（Trade）数据层**
+**Stage 08 — 持仓（Position）数据层**
 
-已建立成交记录表 `trades` 与 `TradeRepository`：
+已建立持仓表 `positions` 与 `PositionRepository`：
 
-- **定位**：Trade 是**已经发生的实际成交**记录，不是委托/订单，也不是持仓
-- **数据关系**：`strategies → signals → trades`；`signal_id` 允许为空（手工交易可不带 Signal）
-- **引用完整性**：`signal_id → signals(id)`、`symbol_id → symbols(id)` 均为真实外键，由数据库强制
-- **side**：`buy` / `sell`（数据库 CHECK + Python 校验）
-- **fee**：默认 0（可为负，用于返佣场景）
-- 本阶段**不做**订单系统、持仓系统、盈亏计算、回测、实盘交易
+- **同一 symbol 只能有一条持仓**：由数据库 `UNIQUE(symbol_id)` 强制，不做重复的 Python 校验
+- **引用完整性**：`symbol_id → symbols(id)` 为真实外键，由数据库强制
+- `quantity` 允许为 0（已清仓）或负数（做空），不加正值限制
+- 本阶段只做**存储层**：**不会**根据 trades 自动推算持仓，也不做盈亏计算
 
 > **时间语义（全局约定）**：所有时间戳为 **UTC**，格式 `YYYY-MM-DD HH:MM:SS`；
 > `klines.timestamp` = K 线开始时间；`signals.timestamp` = 信号发生时间；
-> `trades.timestamp` = 成交发生时间；`created_at` = 记录进入数据库的时间。
+> `trades.timestamp` = 成交发生时间；`positions.updated_at` = 持仓最后更新时间。
 
 （Stage 01 骨架；Stage 02 SQLite 连接/事务/最小数据访问层；Stage 03 symbols；
-Stage 04 klines；Stage 05 strategies；Stage 06 signals。）
+Stage 04 klines；Stage 05 strategies；Stage 06 signals；Stage 07 trades。）
 
 ## 4. 总体模块（规划）
 
 | 目录 | 职责 | 当前状态 |
 |---|---|---|
 | `config/` | 配置集中管理（路径、参数、运行模式） | 空包，仅占位 |
-| `database/` | SQLite 长期数据基础（连接、事务、各业务表访问层） | 基础设施 + `symbols` + `klines` + `strategies` + `signals` + `trades` |
+| `database/` | SQLite 长期数据基础（连接、事务、各业务表访问层） | 基础设施 + `symbols` + `klines` + `strategies` + `signals` + `trades` + `positions` |
 | `data/raw/` | 原始行情数据落地 | 仅目录，未实现采集 |
 | `data/processed/` | 清洗/加工后的中间数据 | 仅目录，未实现处理 |
 | `data/cache/` | 可重建的缓存（不入库） | 仅目录 |
@@ -146,6 +144,20 @@ Stage 04 klines；Stage 05 strategies；Stage 06 signals。）
 - 索引：`idx_trades_symbol_timestamp (symbol_id, timestamp)`
 - 数据关系：`strategies → signals → trades`；本表**只记录成交**，不含订单、持仓、盈亏
 
+### `positions` — 当前实际持仓（Stage 08）
+
+| 字段 | 类型 | 约束 |
+|---|---|---|
+| `id` | INTEGER | PRIMARY KEY AUTOINCREMENT |
+| `symbol_id` | INTEGER | NOT NULL，FOREIGN KEY → `symbols(id)` |
+| `quantity` | REAL | NOT NULL（可为 0 或负值：清仓 / 做空） |
+| `avg_price` | REAL | NOT NULL |
+| `updated_at` | TEXT | NOT NULL，DEFAULT 当前 UTC 时间（持仓最后更新时间） |
+
+- `UNIQUE(symbol_id)`：**同一 symbol 只能有一条持仓**（数据库强制）
+- 该唯一约束已生成隐式索引（`sqlite_autoindex_positions_1`），即按 symbol 查找的路径，不再重复建索引
+- 本表**只做存储**：不会根据 `trades` 自动推算持仓，也不做盈亏计算
+
 ## 6. 各阶段已完成的内容
 
 ### Stage 01 — 项目骨架
@@ -206,6 +218,13 @@ Stage 04 klines；Stage 05 strategies；Stage 06 signals。）
 - [x] `database/__init__.py`：对外导出 `TradeRepository`
 - [x] `tests/test_trades.py`：23 个测试（建表、外键、buy/sell、创建与查询、基本筛选、计数、持久化）
 
+### Stage 08 — 持仓（Position）数据层
+
+- [x] `database/models.py`：新增 `positions` 表（schema 版本 → 6）；`UNIQUE(symbol_id)` + 真实外键
+- [x] `database/position_repository.py`：`PositionRepository`（create / get / get_by_symbol / list / update）
+- [x] `database/__init__.py`：对外导出 `PositionRepository`
+- [x] `tests/test_positions.py`：19 个测试（建表与约束、创建/查询/更新、symbol 唯一性、外键、列表、持久化）
+
 #### 当前已支持
 
 - `symbols` 标的
@@ -216,15 +235,16 @@ Stage 04 klines；Stage 05 strategies；Stage 06 signals。）
 - **strategy status**（draft / testing / active / retired）
 - `signals` 交易信号（含策略 / 标的引用、long / short、pending / executed / cancelled）
 - `trades` 实际成交记录（buy / sell、可关联 Signal 或手工交易）
+- `positions` 当前持仓（每个 symbol 一条）
 
 #### 当前仍未实现
 
-订单系统、持仓系统、盈亏计算（PnL）、执行层、复盘、策略修改、回测、真实行情数据源、实盘交易、AI、API、MCP
-（也尚无信号生成逻辑：Stage 05 / 06 / 07 建立的都是**数据层**）。
+订单系统、盈亏计算（PnL）、执行层、复盘、策略修改、回测、真实行情数据源、实盘交易、AI、API、MCP
+（也尚无信号生成逻辑；持仓不会根据 trades 自动推算：Stage 05~08 建立的都是**数据层**）。
 
 ## 7. 后续阶段会逐步加入的内容（均尚未实现）
 
-- 阶段 07 起：真实行情数据接入（数据采集 / 数据清洗 / 原始数据入库）—— 当前未接入任何外部行情源
+- 阶段 09 起：真实行情数据接入（数据采集 / 数据清洗 / 原始数据入库）—— 当前未接入任何外部行情源
 - 策略逻辑实现与信号生成（Stage 05 / 06 只建立了策略定义与信号数据层，尚无生成逻辑）
 - 回测引擎
 - 风控（Risk Manager，独立于策略）

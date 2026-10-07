@@ -6,9 +6,10 @@
     strategies  —— 策略定义与策略版本（Stage 05）
     signals     —— 策略产生的交易信号（Stage 06）
     trades      —— 实际发生的成交记录（Stage 07）
+    positions   —— 当前实际持仓（Stage 08）
 
 尚未创建的后续业务表：
-    orders / positions / backtests / performance / reviews / optimization_candidates
+    orders / backtests / performance / reviews / optimization_candidates
     —— 属于后续阶段，本阶段一律不建。
 
 schema 版本存放在 SQLite 原生 PRAGMA user_version 中，便于将来做迁移。
@@ -26,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Final
 
 # 当前 schema 版本。后续阶段新增/修改表结构时应递增，并补上迁移逻辑。
-SCHEMA_VERSION: Final[int] = 5
+SCHEMA_VERSION: Final[int] = 6
 
 # 时间统一格式（SQLite 稳定支持，不引入第三方时间库）
 TIMESTAMP_FORMAT: Final[str] = "%Y-%m-%d %H:%M:%S"
@@ -39,6 +40,7 @@ KLINES_TABLE: Final[str] = "klines"
 STRATEGIES_TABLE: Final[str] = "strategies"
 SIGNALS_TABLE: Final[str] = "signals"
 TRADES_TABLE: Final[str] = "trades"
+POSITIONS_TABLE: Final[str] = "positions"
 
 # 数据库初始化后应当存在的业务表（后续阶段新增表时在这里登记）
 BUSINESS_TABLES: Final[tuple[str, ...]] = (
@@ -47,6 +49,7 @@ BUSINESS_TABLES: Final[tuple[str, ...]] = (
     STRATEGIES_TABLE,
     SIGNALS_TABLE,
     TRADES_TABLE,
+    POSITIONS_TABLE,
 )
 
 # ---------------------------------------------------------------------------
@@ -254,6 +257,35 @@ CREATE INDEX IF NOT EXISTS idx_trades_symbol_timestamp
 """
 
 
+# ---------------------------------------------------------------------------
+# positions：当前实际持仓
+#
+# 设计要点：
+#   1. **同一 symbol 只能有一条持仓**：UNIQUE(symbol_id) 由数据库强制，
+#      不在 Python 层重复做存在性检查（重复创建会抛 sqlite3.IntegrityError）。
+#   2. symbol_id 为真实外键，引用 symbols(id)。
+#   3. quantity / avg_price 用 REAL：不同市场手数与币种精度不同；
+#      quantity 允许为 0（已清仓）或负数（做空），故意不加正值限制。
+#   4. updated_at 记录持仓最后更新时间（UTC）；本表按需求不设 created_at。
+#   5. 只做存储层：**不**根据 trades 自动推算持仓，也不做盈亏计算。
+#   6. 不加入本阶段用不到的字段。
+# ---------------------------------------------------------------------------
+CREATE_POSITIONS_TABLE_SQL: Final[str] = f"""
+CREATE TABLE IF NOT EXISTS {POSITIONS_TABLE} (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol_id  INTEGER NOT NULL REFERENCES {SYMBOLS_TABLE}(id),
+    quantity   REAL    NOT NULL,
+    avg_price  REAL    NOT NULL,
+    updated_at TEXT    NOT NULL DEFAULT (strftime('{TIMESTAMP_FORMAT}', 'now')),
+    CONSTRAINT uq_positions_symbol_id UNIQUE (symbol_id)
+)
+"""
+
+# 索引说明：positions 的 UNIQUE(symbol_id) 已经生成一个隐式唯一索引
+# （sqlite_autoindex_positions_1），而本表最主要的查询就是按 symbol 精确查找，
+# 所以**不再**额外创建索引。
+
+
 def utc_now_str() -> str:
     """返回当前 UTC 时间字符串（统一格式 TIMESTAMP_FORMAT）。"""
     return datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT)
@@ -274,5 +306,6 @@ def initialization_statements() -> list[tuple[str, tuple[object, ...]]]:
         (CREATE_SIGNALS_INDEX_SQL, ()),
         (CREATE_TRADES_TABLE_SQL, ()),
         (CREATE_TRADES_INDEX_SQL, ()),
+        (CREATE_POSITIONS_TABLE_SQL, ()),
         (f"PRAGMA user_version = {SCHEMA_VERSION:d}", ()),
     ]
