@@ -48,6 +48,8 @@ from database import (  # noqa: E402  (测试需要先保证项目根目录在 s
     initialize_database,
 )
 
+from database.models import SCHEMA_VERSION  # noqa: E402
+
 KLINES_TABLE = "klines"
 SYMBOLS_TABLE = "symbols"
 
@@ -150,7 +152,10 @@ class KlineSchemaTest(KlineTestCase):
 
     def test_01_klines_table_exists_after_initialize(self) -> None:
         self.assertTrue(self.klines.table_exists(KLINES_TABLE))
-        self.assertEqual(self.klines.list_tables(), [KLINES_TABLE, SYMBOLS_TABLE])
+        # 数据库随阶段演进会继续增加业务表（Stage 05 起还有 strategies），
+        # 这里只断言 klines 存在；"没有多余/越界表" 由 test_database.py 负责
+        self.assertIn(KLINES_TABLE, self.klines.list_tables())
+        self.assertIn(SYMBOLS_TABLE, self.klines.list_tables())
 
     def test_02_columns_types_notnull_and_primary_key(self) -> None:
         columns = {
@@ -216,7 +221,8 @@ class KlineSchemaTest(KlineTestCase):
         self.assertIn("CK_KLINES_OHLC", sql)
 
     def test_06_schema_version_is_recorded(self) -> None:
-        self.assertEqual(self.klines.query_one("PRAGMA user_version")[0], 2)
+        # 断言数据库里的 user_version 与代码里的 SCHEMA_VERSION 一致（防止漏初始化/漏迁移）
+        self.assertEqual(self.klines.query_one("PRAGMA user_version")[0], SCHEMA_VERSION)
 
     def test_07_no_redundant_duplicate_index(self) -> None:
         # UNIQUE 约束已经生成覆盖查询路径的索引，不应再有重复索引

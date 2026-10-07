@@ -24,29 +24,31 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 
 ## 3. 当前开发阶段
 
-**Stage 04 — K 线（OHLCV）数据基础模块**
+**Stage 05 — 策略定义基础模块**
 
-已建立 K 线表 `klines` 与数据访问层 `KlineRepository`：唯一性 `UNIQUE(symbol_id, timeframe, timestamp)`、
-外键引用 `symbols(id)`、OHLC 逻辑由数据库 CHECK 约束保证；写入支持严格插入与 upsert，
-批量写入在单个事务内完成（任意一条失败则整批回滚）。
+已建立策略定义表 `strategies` 与 `StrategyRepository`：
 
-> **当前仅实现 K 线数据库存储与查询基础设施，尚未接入任何真实行情数据源。**
+- **策略版本化**：每个版本都是独立记录（`(name, version)` 唯一），不靠修改原记录来“模拟版本”；
+  未来复盘时可以准确知道当时用的是哪个策略版本
+- **配置**：`config` 以 JSON 文本存储（`dict` ⇄ `json.dumps`/`json.loads`，不依赖 SQLite JSON1）
+- **状态**：`draft` / `testing` / `active` / `retired`（数据库 CHECK + Python 双重保证，非法值不静默转换）
 
-**时间语义（全局约定）**：所有时间戳为 **UTC**，格式 `YYYY-MM-DD HH:MM:SS`；
-`klines.timestamp` 表示该根 K 线的**开始时间**（不是结束时间）；`klines.created_at` 表示记录**进入数据库**的时间。
+> **时间语义（全局约定）**：所有时间戳为 **UTC**，格式 `YYYY-MM-DD HH:MM:SS`；
+> `klines.timestamp` 表示该根 K 线的**开始时间**（不是结束时间）；`created_at` 表示记录**进入数据库**的时间。
+> **本阶段仍不接入任何真实行情数据源。**
 
-（Stage 01 项目骨架；Stage 02 SQLite 连接/事务/最小数据访问层；Stage 03 symbols 标的基础信息。）
+（Stage 01 项目骨架；Stage 02 SQLite 连接/事务/最小数据访问层；Stage 03 symbols；Stage 04 klines。）
 
 ## 4. 总体模块（规划）
 
 | 目录 | 职责 | 当前状态 |
 |---|---|---|
 | `config/` | 配置集中管理（路径、参数、运行模式） | 空包，仅占位 |
-| `database/` | SQLite 长期数据基础（连接、事务、各业务表访问层） | 基础设施 + `symbols` + `klines` |
+| `database/` | SQLite 长期数据基础（连接、事务、各业务表访问层） | 基础设施 + `symbols` + `klines` + `strategies` |
 | `data/raw/` | 原始行情数据落地 | 仅目录，未实现采集 |
 | `data/processed/` | 清洗/加工后的中间数据 | 仅目录，未实现处理 |
 | `data/cache/` | 可重建的缓存（不入库） | 仅目录 |
-| `strategies/` | 策略实现（版本化：v1 / v2 / v3 …） | 空包，仅占位 |
+| `strategies/` | 策略实现（版本化：v1 / v2 / v3 …） | 目录为空；策略定义与版本记录已在数据库层建立，策略逻辑尚未实现 |
 | `backtest/` | 回测引擎（严格按时间顺序，禁止未来数据泄漏） | 空包，仅占位 |
 | `execution/` | 执行层（只机械执行已批准的信号，不自己判断市场） | 空包，仅占位 |
 | `review/` | 交易记录与复盘 | 空包，仅占位 |
@@ -95,11 +97,30 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 - [x] `database/__init__.py`：对外导出 `KlineRepository`
 - [x] `tests/test_klines.py`：63 个测试（Schema、外键、OHLC 约束、NULL、唯一性、upsert、批量原子性、区间与 limit、索引与查询计划、持久化）
 
+### Stage 05 — 策略定义基础模块
+
+- [x] `database/models.py`：新增 `strategies` 表（schema 版本 → 3）；`UNIQUE(name, version)`、`CHECK(version >= 1)`、`CHECK(status IN ...)` 均在数据库层，状态取值与 Python 共用同一个来源
+- [x] `database/strategy_repository.py`：`StrategyRepository`（create / get / get_by_name_version / list / count / update_status / update_config）
+- [x] `database/__init__.py`：对外导出 `StrategyRepository`
+- [x] `tests/test_strategies.py`：49 个测试（Schema、唯一性、版本、状态、config JSON round trip 与非法类型、更新隔离、时间字段、持久化）
+
+#### 当前已支持
+
+- `symbols` 标的
+- `klines` K 线（OHLCV）
+- `strategies` 策略定义
+- **strategy version**（每个版本独立记录）
+- **strategy config**（JSON 文本）
+- **strategy status**（draft / testing / active / retired）
+
+#### 当前仍未实现
+
+信号、回测、订单、持仓、执行、复盘、策略优化、AI、API、MCP、实盘交易、外部行情数据源（Tushare / AKShare / Binance / OKX 等均未接入）。
+
 ## 6. 后续阶段会逐步加入的内容（均尚未实现）
 
-- 阶段 05 起：真实行情数据接入（数据采集 / 清洗 / 入库）、策略框架与策略版本化
-- 数据采集与数据清洗、原始数据入库
-- 策略框架与策略版本化管理
+- 阶段 06 起：真实行情数据接入（数据采集 / 数据清洗 / 原始数据入库）—— 当前未接入任何外部行情源
+- 策略逻辑实现（Stage 05 只建立了策略定义与版本记录，尚无任何策略逻辑）
 - 信号生成
 - 回测引擎
 - 风控（Risk Manager，独立于策略）

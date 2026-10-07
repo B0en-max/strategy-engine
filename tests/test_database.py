@@ -48,10 +48,10 @@ from database import (  # noqa: E402  (测试需要先保证项目根目录在 s
 TEST_TABLE = "stage02_infrastructure_test"
 
 # 当前阶段**之前**明确不应存在的业务表
-# 说明：Stage 03 起 symbols、Stage 04 起 klines 已是合法的正式业务表，
-#       故从禁用清单中移除；其余业务表仍属于后续阶段，必须保持不存在。
+# 说明：Stage 03 起 symbols、Stage 04 起 klines、Stage 05 起 strategies
+#       已是合法的正式业务表，故从禁用清单中移除；其余业务表仍属于
+#       后续阶段，必须保持不存在。
 FORBIDDEN_BUSINESS_TABLES = [
-    "strategies",
     "strategy_versions",
     "signals",
     "orders",
@@ -122,12 +122,12 @@ class DatabaseFileTest(TempDatabaseTestCase):
         initialize_database(self.db_path)
 
         info = database_info(self.db_path)
-        # Stage 03 起 symbols、Stage 04 起 klines 是被允许存在的业务表；
-        # 任何其他表出现都说明提前实现了后续阶段
+        # Stage 03 起 symbols、Stage 04 起 klines、Stage 05 起 strategies 是被
+        # 允许存在的业务表；任何其他表出现都说明提前实现了后续阶段
         self.assertEqual(
             sorted(info["tables"]),
-            ["klines", "symbols"],
-            f"初始化后应只存在 symbols / klines 表，却有: {info['tables']}",
+            ["klines", "strategies", "symbols"],
+            f"初始化后应只存在 symbols / klines / strategies 表，却有: {info['tables']}",
         )
 
         for name in FORBIDDEN_BUSINESS_TABLES:
