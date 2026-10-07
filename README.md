@@ -24,47 +24,74 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 
 ## 3. 当前开发阶段
 
-**Stage 11 — K 线数据采集层**
+**Stage 12 — 接入真实 K 线数据源并完成历史数据导入**
 
-已建立 `data_source/`（数据源实现与 Repository 分离）：
+已接入**真实公开行情接口**并完成历史数据导入（Stage 11 的通用采集层之上，只加了该数据源所需的最小配置）。
 
-- `data_source/base.py`：最小接口 `KlineDataSource`（**只有一个方法** `fetch_klines()`）+ 标准结构 `KlineBar`
-- `data_source/http_source.py`：可配置的 **HTTP / JSON 数据源**（不绑定任何交易所）
-- `data_source/importer.py`：采集编排 `import_klines(...)`，通过现有 `KlineRepository` 写入 `klines` 表
-- 支持：`symbol` / `timeframe` / 起止时间 / 批量写入
-- **重复 K 线不会重复插入**：使用 `bulk_upsert_klines()`（已存在则更新 OHLCV）
-  + 数据库 `UNIQUE(symbol_id, timeframe, timestamp)` 兼底
-- 本阶段**未修改任何表结构**（仍是 7 张表 / `user_version = 7`）；**不接**策略、执行器、实盘
+### 使用的数据源：新浪财经
 
-### 数据源配置（密钥不入代码、不入 Git）
+| 项目 | 说明 |
+|---|---|
+| 接口 | `https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData` |
+| 定位 | A 股 / ETF 等历史 K 线（日内 5/15/30/60 分钟、日线） |
+| 认证 | **无需认证（无 API Key）** |
+| 字段 | `day / open / high / low / close / volume`（数字以字符串返回，已容错解析） |
+| 成交额 | 该接口不返回 → `klines.amount` 为 NULL |
+| 时间语义 | 日内周期的标签是 K 线**结束**时间 → 已按周期回退成**开始**时间（如 `09:45` → `09:30`）；日线标签是日期，不回退 |
+| 时间范围 | 该接口不支持起止时间参数，只能取最近 N 根 → 由 `import_klines` 在本地按区间裁切 |
+
+接入方式：`data_source/presets.py` 的 `sina_cn_kline_config()` 返回一份 `DataSourceConfig`，
+复用 Stage 11 的 `HttpKlineDataSource`（未改动其通用设计，只新增了四个最小配置项：
+`timeframe_mapping`、`timestamp_semantics`、`start_param/end_param` 可为 None、数字/时间字符串容错）。
+
+> 选型说明：本项目实际环境下 Binance / OKX / Coinbase / Yahoo 均不可达（DNS 或连接被拒），
+> 新浪财经接口公开放行、免费、无需认证，因此选它作为首个真实数据源。
+> 换其他数据源只需实现 `KlineDataSource` 或写一份新的配置。
+
+### 环境变量配置
 
 | 环境变量 | 必填 | 说明 |
 |---|---|---|
-| `STRATEGY_ENGINE_DATA_SOURCE_URL` | 是 | API 地址 |
-| `STRATEGY_ENGINE_DATA_SOURCE_API_KEY` | 否 | 认证密钥（**通过请求头**发送，不会出现在 URL 与错误信息里） |
+| `STRATEGY_ENGINE_DATA_SOURCE_URL` | 否 | 数据源地址；不设置时用内置的新浪公开地址 |
+| `STRATEGY_ENGINE_DATA_SOURCE_API_KEY` | 否 | 认证密钥（新浪不需要；**通过请求头发送**，不会出现在 URL 与错误信息里） |
 | `STRATEGY_ENGINE_DATA_SOURCE_TIMEOUT` | 否 | 超时秒数，默认 10 |
 
-可参考仓库内的 `.env.example`（不含真实密钥）。请求参数名、响应路径、字段映射、时间格式
-均可通过 `config.DataSourceConfig` 配置，默认值适配「符号 + 周期 + 起止时间 → JSON 数组」的通用接口。
+仓库内的 `.env.example` 已列出上述变量（**不含任何真实密钥**）。
 
-```python
-from config import DataSourceConfig
-from data_source import HttpKlineDataSource, import_klines
-from database import KlineRepository
+### 如何执行一次历史 K 线导入
 
-source = HttpKlineDataSource(DataSourceConfig.from_env())
-import_klines(
-    source, KlineRepository(), symbol_id=1, symbol="BTCUSDT", timeframe="1h",
-    start_timestamp="2026-01-01 00:00:00", end_timestamp="2026-01-02 00:00:00",
-)
+```powershell
+# 15 分钟：最近 320 根（约 20 个交易日）
+.venv\Scripts\python.exe -m data_source.cli --symbol 600519 --api-symbol sh600519 `
+    --name 贵州茅台 --timeframe 15m --datalen 320
+
+# 日线：最近 60 根
+.venv\Scripts\python.exe -m data_source.cli --symbol 600519 --api-symbol sh600519 --timeframe 1d --datalen 60
 ```
+
+- `--api-symbol` 是数据源代码（新浪：沪市 `sh600519`、深市 `sz000001`）
+- 标的未在 `symbols` 表中时会自动创建（可用 `--market/--asset-type/--name` 指定）
+- `--start/--end`（UTC `YYYY-MM-DD HH:MM:SS`）可选，只在本地裁切范围
+- 重复执行同一时间段**不会产生重复数据**（upsert + 唯一约束）
+
+### 本次真实导入结果（人工验收）
+
+写入 `data/strategy_engine.db`（该文件不入 Git）：
+
+| 标的 | 周期 | 行数 | 时间范围 | 校验 |
+|---|---|---|---|---|
+| 600519 贵州茅台（CN/STOCK） | 15m | 320 | 2026-09-02 09:30 ~ 2026-09-30 14:45 | 20 个交易日 × 16 根，时间网格与 A 股 09:30~14:45 完全一致 |
+| 600519 贵州茅台（CN/STOCK） | 1d | 60 | 2026-07-08 ~ 2026-09-30 | 无重复日期，间隔均为 1/3/4 天（周末与假期） |
+
+其他校验：OHLC 非法行 0、`high >= low` 全部成立、价格均为正、无重复 `(symbol, timeframe, timestamp)`、
+时间严格升序；**重复导入后行数不变**。
 
 > **时间语义（全局约定）**：所有时间戳为 **UTC**，格式 `YYYY-MM-DD HH:MM:SS`；
 > `klines.timestamp` = K 线开始时间；`signals.timestamp` = 信号发生时间；
 > `trades.timestamp` = 成交发生时间；`orders.created_at` = 订单创建时间。
 
 （Stage 01 骨架；02 SQLite 基础；03 symbols；04 klines；05 strategies；06 signals；
-07 trades；08 positions；09 orders；10 模拟执行器。）
+07 trades；08 positions；09 orders；10 模拟执行器；11 K 线采集层。）
 
 ## 4. 总体模块（规划）
 
@@ -75,7 +102,7 @@ import_klines(
 | `data/raw/` | 原始行情数据落地 | 仅目录（当前采集直接写入 `klines` 表，未落地原始文件） |
 | `data/processed/` | 清洗/加工后的中间数据 | 仅目录，未实现处理 |
 | `data/cache/` | 可重建的缓存（不入库） | 仅目录 |
-| `data_source/` | 行情数据采集（数据源接口 + HTTP/JSON 实现 + 导入编排） | 已实现（Stage 11）：仅历史 K 线，无实时推送 |
+| `data_source/` | 行情数据采集（数据源接口 + HTTP/JSON 实现 + 预设 + 导入 CLI） | 已实现：已接入**新浪财经**并完成真实历史导入 |
 | `strategies/` | 策略实现（版本化：v1 / v2 / v3 …） | 目录为空；策略定义与版本记录已在数据库层建立，策略逻辑尚未实现 |
 | `backtest/` | 回测引擎（严格按时间顺序，禁止未来数据泄漏） | 空包，仅占位 |
 | `execution/` | 执行层（只机械执行已批准的信号，不自己判断市场） | **模拟执行器已实现**（`execution/engine.py`），无实盘 |
@@ -123,6 +150,7 @@ import_klines(
 
 - `UNIQUE(symbol_id, timeframe, timestamp)`；`CHECK` 保证 `high >= open/close/low` 且 `low <= open/close/high`
 - 故意不限制 `price > 0` / `volume > 0`；唯一约束已生成隐式索引（列顺序即查询路径），不重复建索引
+- 数据来源：Stage 12 已通过新浪财经接入真实历史 K 线（导入方式与结果见第 3 节）
 
 ### `strategies` — 策略定义与版本（Stage 05）
 
@@ -297,26 +325,40 @@ import_klines(
 - [x] `tests/test_data_source.py`：30 个测试（配置、请求构造、响应解析与字段映射、
   时间格式转换、错误处理与密钥不泄漏、写入、重复采集、时间范围、mock HTTP 端到端）
 
+### Stage 12 — 接入真实 K 线数据源（新浪财经）
+
+- [x] `data_source/presets.py`：`sina_cn_kline_config()`（地址 / 参数名 / 周期映射 / 字段映射 / 时间语义 / datalen 校验）
+- [x] `data_source/cli.py`：命令行导入工具（`python -m data_source.cli`），自动补建标的并打印汇总
+- [x] `config/settings.py`：新增最小配置项 `timeframe_mapping`、`timestamp_semantics`；`start_param/end_param` 允许为 None
+- [x] `data_source/http_source.py`：数字容错（字符串型数字）、时间字符串规范化、
+  结束时间→开始时间回退、可不下发时间范围参数
+- [x] `data_source/base.py`：`timeframe_to_seconds()` / `is_intraday_timeframe()`
+- [x] `data_source/importer.py`：数据源不支持范围参数时，在本地按闭区间裁切
+- [x] `tests/test_sina_source.py`：14 个测试（预设配置、请求构造、字符串型数字、
+  15m 结束→开始回退、日线不回退、本地裁切、重复导入、CLI 汇总；**全部用 mock，不联网**）
+- [x] `tests/test_data_source.py`：新增 10 个通用扩展测试
+- [x] 真实验收：600519 的 15m 320 根 + 1d 60 根写入正式库（详见第 3 节），重复导入行数不变
+
 #### 当前已支持
 
 - `symbols` 标的
-- `klines` K 线（OHLCV）
+- `klines` K 线（OHLCV）—— 已含**真实历史数据**
 - `strategies` 策略定义（含 version / config / status）
 - `signals` 交易信号
 - `trades` 实际成交记录
 - `positions` 当前持仓
 - `orders` 订单（market / limit、五种状态）
 - **模拟执行器**：Signal → Order → Trade → Position 全链路，单事务原子、失败整体回滚
-- **K 线采集层**：可配置 HTTP/JSON 数据源 → 通过 `KlineRepository` 写入 `klines`，重复采集不重复插入
+- **K 线采集层**：可配置 HTTP/JSON 数据源（已接入新浪财经）→ 写入 `klines`，重复采集不重复插入
 
 #### 当前仍未实现
 
-实时行情推送、实盘交易（OKX / 券商 API）、回测、盈亏计算（PnL）、复盘、
+实时行情推送与定时采集、实盘交易（OKX / 券商 API）、回测、盈亏计算（PnL）、复盘、
 策略逻辑与信号生成、策略修改、风控（Risk Manager）、AI、API、MCP、前端。
 
 ## 7. 后续阶段会逐步加入的内容（均尚未实现）
 
-- 阶段 12 起：实时行情 / 定时采集调度（当前只支持按需拉取历史 K 线）
+- 阶段 13 起：实时行情 / 定时采集调度（当前只支持手动按需拉取历史 K 线）
 - 策略逻辑实现与信号生成（Stage 05 / 06 只建立了策略定义与信号数据层，尚无生成逻辑）
 - 风控（Risk Manager）：独立于策略放行信号（当前模拟执行器不做风控判断）
 - 回测引擎与防过拟合验证（Train / Validation / Test / Walk-forward / Stress Test）

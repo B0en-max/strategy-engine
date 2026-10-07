@@ -30,9 +30,9 @@ class ImportResult:
     timeframe: str
     start_timestamp: str | None
     end_timestamp: str | None
-    #: 数据源返回的 K 线条数
+    #: 数据源返回的 K 线条数（裁切前）
     fetched: int
-    #: 实际提交写入的条数（重复 K 线会被更新而不是新增，因此不等于新增行数）
+    #: 实际提交写入的条数（已按请求时间范围裁切；重复 K 线会被更新而不是新增）
     written: int
 
 
@@ -52,10 +52,14 @@ def import_klines(
         source          任意实现了 KlineDataSource 的数据源
         repository      现有 KlineRepository（负责实际写库）
         symbol_id       klines.symbol_id（对应 symbols 表中的标的）
-        symbol          外部数据源使用的标的代码（例如 "BTCUSDT"）
-        timeframe       K 线周期（例如 "1h"）
+        symbol          外部数据源使用的标的代码（例如 "sh600519"）
+        timeframe       K 线周期（例如 "15m"）
         start_timestamp 起始时间（含），UTC 'YYYY-MM-DD HH:MM:SS'
         end_timestamp   结束时间（含），UTC 'YYYY-MM-DD HH:MM:SS'
+
+    时间范围处理：
+        时间范围会先传给数据源；若数据源不支持范围参数（例如只返回最近 N 根），
+        返回结果会再在本地按 [start, end]（**闭区间**）裁切，保证入库数据落在请求范围内。
     """
     symbol_id = require_positive_int(symbol_id, "symbol_id")
     symbol = require_symbol_code(symbol)
@@ -73,9 +77,20 @@ def import_klines(
     )
     if not isinstance(bars, list):
         raise DataSourceError(f"数据源应返回 KlineBar 列表，实际为 {type(bars).__name__}")
+    fetched = len(bars)
 
-    # 先全部转换 + 校验格式（任何格式错误都在写库之前中止），并按时间排序
+    # 先全部转换 + 校验格式（任何格式错误都在写库之前中止，时间戳也已规范化）
     rows = [bar.to_kline_row(symbol_id) for bar in bars]
+
+    # 本地裁切到请求的时间范围（闭区间）
+    if start_timestamp is not None or end_timestamp is not None:
+        rows = [
+            row
+            for row in rows
+            if (start_timestamp is None or str(row["timestamp"]) >= start_timestamp)
+            and (end_timestamp is None or str(row["timestamp"]) <= end_timestamp)
+        ]
+
     rows.sort(key=lambda row: str(row["timestamp"]))
 
     written = 0 if not rows else repository.bulk_upsert_klines(rows)
@@ -85,6 +100,6 @@ def import_klines(
         timeframe=timeframe,
         start_timestamp=start_timestamp,
         end_timestamp=end_timestamp,
-        fetched=len(bars),
+        fetched=fetched,
         written=written,
     )

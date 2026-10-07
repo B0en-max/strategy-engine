@@ -18,6 +18,12 @@ ENV_TIMEOUT: Final[str] = "STRATEGY_ENGINE_DATA_SOURCE_TIMEOUT"
 #: 时间格式取值：秒级时间戳 / 毫秒级时间戳 / 'YYYY-MM-DD HH:MM:SS'（UTC）
 TIMESTAMP_FORMATS: Final[tuple[str, ...]] = ("seconds", "milliseconds", "datetime")
 
+#: 数据源时间标签的含义
+#:   start —— 标签是 K 线**开始**时间（本项目内部约定）
+#:   end   —— 标签是 K 线**结束**时间（部分数据源如此，如新浪财经的日内周期）；
+#:            解析时会按周期长度回退到开始时间（仅日内周期回退，日线及以上的标签是日期）
+TIMESTAMP_SEMANTICS: Final[tuple[str, ...]] = ("start", "end")
+
 #: 标准字段 → 外部响应里的字段名（默认同名）
 DEFAULT_FIELD_MAPPING: Final[dict[str, str]] = {
     "timestamp": "timestamp",
@@ -55,14 +61,20 @@ class DataSourceConfig:
     timeout: float = 10.0
     #: 固定附加查询参数（例如 provider 要求的额外字段）
     extra_params: Mapping[str, str] = field(default_factory=dict)
-    #: 查询参数名
+    #: 查询参数名；start_param / end_param 为 None 表示该数据源不支持时间范围参数
+    #: （此时调用方传入的时间范围由 import_klines 在本地裁切）
     symbol_param: str = "symbol"
     timeframe_param: str = "interval"
-    start_param: str = "startTime"
-    end_param: str = "endTime"
+    start_param: str | None = "startTime"
+    end_param: str | None = "endTime"
+    #: 我方 timeframe → 数据源 timeframe 取值（例如新浪财经 "15m" → "15"，"1d" → "240"）
+    #: None 表示直接透传
+    timeframe_mapping: Mapping[str, str] | None = None
     #: 请求时间格式 / 响应时间格式
     request_timestamp_format: str = "seconds"
     response_timestamp_format: str = "seconds"
+    #: 响应时间标签的含义（start / end）
+    timestamp_semantics: str = "start"
     #: 响应 JSON 中 K 线数组的位置（点号路径，例如 "data.klines"）；None 表示响应本身就是数组
     response_path: str | None = None
     #: 标准字段 → 外部字段名
@@ -79,6 +91,14 @@ class DataSourceConfig:
         ):
             if fmt not in TIMESTAMP_FORMATS:
                 raise ConfigError(f"{name} 必须是 {list(TIMESTAMP_FORMATS)} 之一，实际为 {fmt!r}")
+        if self.timestamp_semantics not in TIMESTAMP_SEMANTICS:
+            raise ConfigError(
+                f"timestamp_semantics 必须是 {list(TIMESTAMP_SEMANTICS)} 之一，实际为 {self.timestamp_semantics!r}"
+            )
+        if self.timeframe_mapping is not None:
+            bad = [k for k, v in self.timeframe_mapping.items() if not isinstance(v, str) or not v]
+            if bad:
+                raise ConfigError(f"timeframe_mapping 的值必须是非空字符串，问题键: {bad}")
         missing = [name for name in REQUIRED_FIELDS if name not in self.field_mapping]
         if missing:
             raise ConfigError(f"field_mapping 缺少必需字段映射: {missing}")
@@ -116,3 +136,14 @@ class DataSourceConfig:
         if self.api_key:
             headers[self.api_key_header] = self.api_key
         return headers
+
+    def map_timeframe(self, timeframe: str) -> str:
+        """把我方 timeframe 转换成数据源要求的取值。"""
+        if self.timeframe_mapping is None:
+            return timeframe
+        if timeframe not in self.timeframe_mapping:
+            raise ConfigError(
+                f"timeframe {timeframe!r} 未在该数据源的映射表中，"
+                f"已支持: {sorted(self.timeframe_mapping)}"
+            )
+        return self.timeframe_mapping[timeframe]

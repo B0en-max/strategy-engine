@@ -1,16 +1,25 @@
-"""通用的 HTTP / JSON 行情数据源实现（Stage 11）。
+"""通用的 HTTP / JSON 行情数据源实现（Stage 11，Stage 12 扩展）。
 
 特点：
     - **不绑定任何具体交易所**：地址、认证、查询参数名、响应路径、字段映射、
-      时间格式全部由 config.DataSourceConfig 提供。
+      周期映射、时间格式全部由 config.DataSourceConfig 提供。
     - 认证信息通过**请求头**发送（不拼进 URL），错误信息里也不会出现密钥。
     - 网络访问通过可注入的 opener 完成，便于测试时用 mock 替换（不打真实网络）。
+
+Stage 12 增加的通用能力（为接入真实数据源所需的最小扩展）：
+    - 数字容错：部分接口把价格 / 成交量 / 时间戳返回成字符串
+    - 时间规范化：兼容 'YYYY-MM-DD'、'YYYY-MM-DD HH:MM'、ISO 的 'T' 分隔符
+    - timeframe_mapping：把内部周期（如 '15m'）映射成数据源取值（如 '15'）
+    - timestamp_semantics='end'：数据源时间标签是 K 线**结束**时间时，
+      解析后按周期长度回退到开始时间（仅日内周期；日线及以上标签是日期，不回退）
+    - start_param / end_param 为 None 时不下发时间范围参数（由采集器本地裁切）
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -20,10 +29,19 @@ from config import DataSourceConfig
 from database import models
 from database.validation import require_number, require_timeframe, require_timestamp
 
-from .base import DataSourceError, KlineBar, KlineDataSource, require_symbol_code
+from .base import (
+    SECONDS_PER_DAY,
+    DataSourceError,
+    KlineBar,
+    KlineDataSource,
+    require_symbol_code,
+    timeframe_to_seconds,
+)
 
 #: 请求执行器：(url, headers, timeout) -> 响应字节
 Opener = Callable[[str, Mapping[str, str], float], bytes]
+
+_DATETIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2})(?::(\d{2}))?)?$")
 
 
 def default_opener(url: str, headers: Mapping[str, str], timeout: float) -> bytes:
@@ -31,6 +49,20 @@ def default_opener(url: str, headers: Mapping[str, str], timeout: float) -> byte
     request = Request(url, headers=dict(headers), method="GET")
     with urlopen(request, timeout=timeout) as response:  # noqa: S310 (地址由配置提供)
         return response.read()
+
+
+def parse_response_number(value: Any, field: str) -> float:
+    """把响应中的数字转换成 float。
+
+    兼容部分接口把数字返回成字符串（例如 "1261.440"）的情况。
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            value = float(text)
+        except ValueError as exc:
+            raise DataSourceError(f"{field} 不是数字: {value!r}") from exc
+    return require_number(value, field)
 
 
 def format_request_timestamp(timestamp: str, timestamp_format: str) -> int | str:
@@ -42,13 +74,25 @@ def format_request_timestamp(timestamp: str, timestamp_format: str) -> int | str
     return int(epoch * 1000) if timestamp_format == "milliseconds" else int(epoch)
 
 
-def parse_response_timestamp(value: object, timestamp_format: str) -> str:
+def normalize_datetime(value: Any) -> str:
+    """把日期 / 时间字符串规范化为内部格式 'YYYY-MM-DD HH:MM:SS'。
+
+    兼容 'YYYY-MM-DD'、'YYYY-MM-DD HH:MM'、'YYYY-MM-DD HH:MM:SS' 以及 ISO 的 'T' 分隔符。
+    """
+    if not isinstance(value, str):
+        raise DataSourceError(f"时间字段应为字符串，实际为 {value!r}")
+    match = _DATETIME_RE.match(value.strip())
+    if match is None:
+        raise DataSourceError(f"无法解析时间字符串: {value!r}")
+    date_part, hhmm, seconds = match.groups()
+    return f"{date_part} {hhmm or '00:00'}:{seconds or '00'}"
+
+
+def parse_response_timestamp(value: Any, timestamp_format: str) -> str:
     """把响应里的时间转换成内部 UTC 时间字符串。"""
     if timestamp_format == "datetime":
-        if not isinstance(value, str):
-            raise DataSourceError(f"时间字段应为字符串，实际为 {value!r}")
-        return value
-    number = require_number(value, "timestamp")
+        return normalize_datetime(value)
+    number = parse_response_number(value, "timestamp")
     seconds = number / 1000 if timestamp_format == "milliseconds" else number
     try:
         return datetime.fromtimestamp(seconds, tz=timezone.utc).strftime(models.TIMESTAMP_FORMAT)
@@ -69,6 +113,19 @@ def _extract_bars(payload: Any, response_path: str | None) -> list[Any]:
             f"K 线数组应为 JSON 列表，实际为 {type(current).__name__}（response_path={response_path!r}）"
         )
     return current
+
+
+def shift_to_bar_start(timestamp: str, timeframe: str) -> str:
+    """把 K 线**结束**时间回退成**开始**时间（仅日内周期需要）。"""
+    seconds = timeframe_to_seconds(timeframe)
+    if seconds >= SECONDS_PER_DAY:
+        # 日线以上的时间标签是日期，本身就代表该周期的起点，不回退
+        return timestamp
+    try:
+        start = datetime.strptime(timestamp, models.TIMESTAMP_FORMAT) - timedelta(seconds=seconds)
+    except ValueError as exc:
+        raise DataSourceError(f"无法按结束时间语义回退 K 线时间 {timestamp!r}: {exc}") from exc
+    return start.strftime(models.TIMESTAMP_FORMAT)
 
 
 class HttpKlineDataSource(KlineDataSource):
@@ -124,19 +181,22 @@ class HttpKlineDataSource(KlineDataSource):
             return None if (not required and value is None) else value
 
         try:
+            timestamp = parse_response_timestamp(
+                field("timestamp"), self._config.response_timestamp_format
+            )
+            if self._config.timestamp_semantics == "end":
+                timestamp = shift_to_bar_start(timestamp, timeframe)
             amount_value = field("amount", required=False)
             return KlineBar(
                 symbol=symbol,
                 timeframe=timeframe,
-                timestamp=parse_response_timestamp(
-                    field("timestamp"), self._config.response_timestamp_format
-                ),
-                open=require_number(field("open"), "open"),
-                high=require_number(field("high"), "high"),
-                low=require_number(field("low"), "low"),
-                close=require_number(field("close"), "close"),
-                volume=require_number(field("volume"), "volume"),
-                amount=None if amount_value is None else require_number(amount_value, "amount"),
+                timestamp=timestamp,
+                open=parse_response_number(field("open"), "open"),
+                high=parse_response_number(field("high"), "high"),
+                low=parse_response_number(field("low"), "low"),
+                close=parse_response_number(field("close"), "close"),
+                volume=parse_response_number(field("volume"), "volume"),
+                amount=None if amount_value is None else parse_response_number(amount_value, "amount"),
             )
         except DataSourceError:
             raise
@@ -158,15 +218,22 @@ class HttpKlineDataSource(KlineDataSource):
 
         params: dict[str, object] = dict(self._config.extra_params)
         params[self._config.symbol_param] = symbol
-        params[self._config.timeframe_param] = timeframe
+        params[self._config.timeframe_param] = self._config.map_timeframe(timeframe)
         if start_timestamp is not None:
-            params[self._config.start_param] = format_request_timestamp(
-                require_timestamp(start_timestamp), self._config.request_timestamp_format
-            )
+            start = require_timestamp(start_timestamp)
+            if self._config.start_param is not None:
+                params[self._config.start_param] = format_request_timestamp(
+                    start, self._config.request_timestamp_format
+                )
         if end_timestamp is not None:
-            params[self._config.end_param] = format_request_timestamp(
-                require_timestamp(end_timestamp), self._config.request_timestamp_format
-            )
+            end = require_timestamp(end_timestamp)
+            if self._config.end_param is not None:
+                params[self._config.end_param] = format_request_timestamp(
+                    end, self._config.request_timestamp_format
+                )
 
         payload = self._get_json(params)
-        return [self._parse_bar(symbol, timeframe, raw) for raw in _extract_bars(payload, self._config.response_path)]
+        return [
+            self._parse_bar(symbol, timeframe, raw)
+            for raw in _extract_bars(payload, self._config.response_path)
+        ]

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -89,3 +90,31 @@ class KlineDataSource(ABC):
 def require_symbol_code(value: object) -> str:
     """校验外部数据源使用的标的代码。"""
     return require_text(value, "symbol")
+
+
+_TIMEFRAME_RE = re.compile(r"^(\d+)([mhdw])$")
+_TIMEFRAME_UNIT_SECONDS: dict[str, int] = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+#: 一天的秒数：用于判断是否为日内周期
+SECONDS_PER_DAY: int = 86400
+
+
+def timeframe_to_seconds(timeframe: str) -> int:
+    """把周期字符串换算成秒数（例如 "15m" → 900、"1h" → 3600、"1d" → 86400）。
+
+    只支持 m / h / d / w 这几种单位；无法识别时抛出 ValueError
+    （因为需要周期长度才能判断行情数据的时间语义）。
+    """
+    text = require_timeframe(timeframe)
+    match = _TIMEFRAME_RE.match(text)
+    if match is None:
+        raise ValueError(
+            f"无法从 timeframe {timeframe!r} 推断周期长度（支持如 15m / 1h / 4h / 1d / 1w）"
+        )
+    amount, unit = match.groups()
+    return int(amount) * _TIMEFRAME_UNIT_SECONDS[unit]
+
+
+def is_intraday_timeframe(timeframe: str) -> bool:
+    """是否为日内周期（短于一天）。"""
+    return timeframe_to_seconds(timeframe) < SECONDS_PER_DAY

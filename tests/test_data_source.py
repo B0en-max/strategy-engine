@@ -39,7 +39,12 @@ from data_source import (  # noqa: E402
     KlineDataSource,
     import_klines,
 )
-from data_source.http_source import format_request_timestamp, parse_response_timestamp  # noqa: E402
+from data_source.http_source import (  # noqa: E402
+    format_request_timestamp,
+    normalize_datetime,
+    parse_response_timestamp,
+)
+from data_source.base import timeframe_to_seconds  # noqa: E402
 from database import DEFAULT_DB_PATH, KlineRepository, SymbolRepository, initialize_database  # noqa: E402
 
 BASE_URL = "https://api.example.test/klines"
@@ -47,6 +52,7 @@ API_KEY = "secret-test-key"
 
 T0 = "2026-01-01 00:00:00"
 T1 = "2026-01-01 01:00:00"
+T2 = "2026-01-01 02:00:00"
 
 
 class FakeOpener:
@@ -448,6 +454,132 @@ class EndToEndWithMockHttpTest(ImporterTestCase):
     def test_02_tests_never_touch_the_production_database(self) -> None:
         self.assertNotEqual(self.klines.db_path, DEFAULT_DB_PATH)
         self.assertEqual(self.klines.db_path, self.db_path)
+
+
+class GenericSourceExtensionsTest(unittest.TestCase):
+    """Stage 12：为接入真实数据源所做的通用扩展。"""
+
+    def test_01_timeframe_mapping_is_applied(self) -> None:
+        opener = FakeOpener([])
+        source = HttpKlineDataSource(
+            make_config(timeframe_param="scale", timeframe_mapping={"15m": "15", "1d": "240"}),
+            opener=opener,
+        )
+        source.fetch_klines(symbol="sh600519", timeframe="15m")
+        self.assertIn("scale=15", opener.last_url)
+
+        source.fetch_klines(symbol="sh600519", timeframe="1d")
+        self.assertIn("scale=240", opener.last_url)
+
+        with self.assertRaises(ConfigError):
+            source.fetch_klines(symbol="sh600519", timeframe="1m")
+
+    def test_02_time_range_params_can_be_disabled(self) -> None:
+        opener = FakeOpener([])
+        source = HttpKlineDataSource(make_config(start_param=None, end_param=None), opener=opener)
+        source.fetch_klines(symbol="X", timeframe="1d", start_timestamp=T0, end_timestamp=T1)
+        self.assertNotIn("startTime", opener.last_url)
+        self.assertNotIn("endTime", opener.last_url)
+
+        with self.assertRaises(ValueError):  # 即使不下发，也要校验格式
+            source.fetch_klines(symbol="X", timeframe="1d", start_timestamp="2026-01-01")
+
+    def test_03_numeric_strings_are_accepted(self) -> None:
+        opener = FakeOpener(
+            [{"timestamp": "1767225600", "open": "1.5", "high": "2", "low": "1", "close": "1.75", "volume": "100"}]
+        )
+        bar = HttpKlineDataSource(make_config(), opener=opener).fetch_klines(symbol="X", timeframe="1d")[0]
+        self.assertEqual(bar.timestamp, T0)
+        self.assertAlmostEqual(bar.open, 1.5)
+        self.assertAlmostEqual(bar.close, 1.75)
+        self.assertAlmostEqual(bar.volume, 100.0)
+        self.assertIsNone(bar.amount)
+
+    def test_04_datetime_values_are_normalized(self) -> None:
+        cases = {
+            "2026-01-01": "2026-01-01 00:00:00",
+            "2026-01-01 09:45": "2026-01-01 09:45:00",
+            "2026-01-01 09:45:30": "2026-01-01 09:45:30",
+            "2026-01-01T09:45:30": "2026-01-01 09:45:30",
+            "  2026-01-01 09:45  ": "2026-01-01 09:45:00",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(value=raw):
+                self.assertEqual(normalize_datetime(raw), expected)
+        for bad in ("01/01/2026", "2026-1-1", 1767225600, None):
+            with self.subTest(value=bad):
+                with self.assertRaises(DataSourceError):
+                    normalize_datetime(bad)
+
+    def test_05_end_semantics_shifts_only_intraday(self) -> None:
+        rows = [{"timestamp": "2026-01-01 09:45:00", "open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 10}]
+        opener = FakeOpener(rows)
+        source = HttpKlineDataSource(
+            make_config(response_timestamp_format="datetime", timestamp_semantics="end"),
+            opener=opener,
+        )
+        # 15 分钟：结束时间 09:45 → 开始时间 09:30
+        self.assertEqual(
+            source.fetch_klines(symbol="X", timeframe="15m")[0].timestamp, "2026-01-01 09:30:00"
+        )
+
+        daily = FakeOpener([{**rows[0], "timestamp": "2026-01-01"}])
+        daily_source = HttpKlineDataSource(
+            make_config(response_timestamp_format="datetime", timestamp_semantics="end"),
+            opener=daily,
+        )
+        # 日线：标签是日期，不回退
+        self.assertEqual(
+            daily_source.fetch_klines(symbol="X", timeframe="1d")[0].timestamp, "2026-01-01 00:00:00"
+        )
+
+        with self.assertRaises(DataSourceError):  # 无法推断周期长度时不能应用结束语义
+            source.fetch_klines(symbol="X", timeframe="1M")
+
+    def test_06_timeframe_to_seconds(self) -> None:
+        self.assertEqual(timeframe_to_seconds("15m"), 900)
+        self.assertEqual(timeframe_to_seconds("1h"), 3600)
+        self.assertEqual(timeframe_to_seconds("4h"), 14400)
+        self.assertEqual(timeframe_to_seconds("1d"), 86400)
+        self.assertEqual(timeframe_to_seconds("1w"), 604800)
+        for bad in ("1M", "daily", "", "10x"):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    timeframe_to_seconds(bad)
+
+    def test_07_invalid_timestamp_semantics_is_rejected(self) -> None:
+        with self.assertRaises(ConfigError):
+            make_config(timestamp_semantics="middle")
+
+
+class RangeTrimmingTest(ImporterTestCase):
+    """Stage 12：数据源不支持时间范围参数时，由采集器本地裁切。"""
+
+    def test_01_only_bars_inside_range_are_written(self) -> None:
+        source = FakeSource([make_bar(T0), make_bar(T1), make_bar(T2)])
+        result = import_klines(
+            source, self.klines, self.symbol_id, symbol="BTCUSDT", timeframe="1h",
+            start_timestamp=T1, end_timestamp=T2,
+        )
+        self.assertEqual(result.fetched, 3)
+        self.assertEqual(result.written, 2)
+        self.assertEqual(
+            [r["timestamp"] for r in self.klines.list_klines(self.symbol_id, "1h")], [T1, T2]
+        )
+
+    def test_02_bars_outside_range_write_nothing(self) -> None:
+        source = FakeSource([make_bar(T0)])
+        result = import_klines(
+            source, self.klines, self.symbol_id, symbol="BTCUSDT", timeframe="1h",
+            start_timestamp=T2,
+        )
+        self.assertEqual((result.fetched, result.written), (1, 0))
+        self.assertEqual(self.klines.count_klines(self.symbol_id, "1h"), 0)
+
+    def test_03_no_range_means_no_trimming(self) -> None:
+        source = FakeSource([make_bar(T0), make_bar(T1)])
+        result = import_klines(source, self.klines, self.symbol_id, symbol="BTCUSDT", timeframe="1h")
+        self.assertEqual((result.fetched, result.written), (2, 2))
 
 
 if __name__ == "__main__":

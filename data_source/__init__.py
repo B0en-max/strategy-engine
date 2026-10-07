@@ -3,7 +3,9 @@
 结构：
     base.py         KlineBar / KlineDataSource（最小接口）/ DataSourceError
     http_source.py  可配置的 HTTP / JSON 数据源（不绑定具体交易所）
+    presets.py      具体数据源的预设配置（当前：新浪财经）
     importer.py     采集编排：数据源 → KlineRepository → klines 表
+    cli.py          命令行入口（人工验收 / 日常补数据；自动测试不依赖网络）
 
 边界：
     - 只做**历史 K 线采集**：不接策略、不接执行器、不做实盘、不做实时行情推送
@@ -11,9 +13,10 @@
     - API 地址与密钥来自 config（环境变量），不硬编码、不入 Git
 """
 
-from .base import DataSourceError, KlineBar, KlineDataSource
+from .base import DataSourceError, KlineBar, KlineDataSource, timeframe_to_seconds
 from .http_source import HttpKlineDataSource
 from .importer import ImportResult, import_klines
+from .presets import SINA_KLINE_URL, SINA_TIMEFRAME_MAPPING, sina_cn_kline_config
 
 __all__ = [
     "DataSourceError",
@@ -21,5 +24,9 @@ __all__ = [
     "ImportResult",
     "KlineBar",
     "KlineDataSource",
+    "SINA_KLINE_URL",
+    "SINA_TIMEFRAME_MAPPING",
     "import_klines",
+    "sina_cn_kline_config",
+    "timeframe_to_seconds",
 ]
