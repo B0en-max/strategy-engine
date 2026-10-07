@@ -1,17 +1,19 @@
-"""数据库模块：Strategy Engine 统一的数据访问层入口（Stage 02）。
+"""数据库模块：Strategy Engine 统一的数据访问层入口（Stage 02 ~ Stage 04）。
 
-对外暴露的最小接口：
+对外暴露的接口：
 
-    initialize_database()   初始化数据库（幂等，不创建任何业务表）
+    initialize_database()   初始化数据库（幂等，创建 symbols / klines 表）
     connect() / close()     连接创建与关闭
     connection()            连接上下文：提交 / 回滚 / 自动关闭
     transaction()           在已有连接上开启显式事务
     Repository              最小数据访问层
     SymbolRepository        标的基础数据访问层（symbols 表）
+    KlineRepository         K 线数据访问层（klines 表）
     get_database_path()     默认数据库路径（data/strategy_engine.db）
     database_info()         只读状态信息，便于排查问题
 
-本阶段不含任何业务表与业务实体。
+当前正式业务表：symbols（Stage 03）、klines（Stage 04）。
+策略、信号、订单、交易、持仓、回测等业务表尚未建立。
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from .database import (
     resolve_database_path,
     transaction,
 )
+from .kline_repository import KlineRepository
 from .repository import Repository
 from .symbol_repository import SymbolRepository
 
@@ -39,6 +42,7 @@ __all__ = [
     "DEFAULT_DB_FILENAME",
     "DEFAULT_DB_PATH",
     "PROJECT_ROOT",
+    "KlineRepository",
     "Repository",
     "SymbolRepository",
     "close",

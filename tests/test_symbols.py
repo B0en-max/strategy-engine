@@ -39,6 +39,7 @@ from database import (  # noqa: E402  (测试需要先保证项目根目录在 s
     SymbolRepository,
     initialize_database,
 )
+from database.models import SCHEMA_VERSION  # noqa: E402
 
 SYMBOLS_TABLE = "symbols"
 
@@ -77,7 +78,9 @@ class SymbolsSchemaTest(SymbolTestCase):
 
     def test_01_symbols_table_exists_after_initialize(self) -> None:
         self.assertTrue(self.repo.table_exists(SYMBOLS_TABLE))
-        self.assertEqual(self.repo.list_tables(), [SYMBOLS_TABLE])
+        # 数据库随阶段演进会增加业务表（Stage 04 起还有 klines），
+        # 这里只断言 symbols 存在；"没有多余/越界表" 由 test_database.py 负责
+        self.assertIn(SYMBOLS_TABLE, self.repo.list_tables())
 
     def test_02_symbols_table_columns(self) -> None:
         columns = {
@@ -120,8 +123,9 @@ class SymbolsSchemaTest(SymbolTestCase):
         self.assertEqual(index_columns, ["market", "symbol"], "唯一约束应覆盖 (market, symbol)")
 
     def test_04_schema_version_is_recorded(self) -> None:
+        # 断言数据库里的 user_version 与代码里的 SCHEMA_VERSION 一致（防止漏初始化/漏迁移）
         version = self.repo.query_one("PRAGMA user_version")[0]
-        self.assertEqual(version, 1)
+        self.assertEqual(version, SCHEMA_VERSION)
 
 
 class SymbolCreateTest(SymbolTestCase):
