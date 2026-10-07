@@ -24,16 +24,17 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 
 ## 3. 当前开发阶段
 
-**Stage 01 — Project Skeleton（项目骨架）**
+**Stage 02 — SQLite 数据库基础设施**
 
-本阶段只建立目录结构、基础配置文件、Git 仓库与最小测试结构，**不实现任何业务功能**。
+已建立 SQLite 连接管理、事务与最小数据访问层；**当前数据库中没有任何业务表**。
+（Stage 01 已完成项目骨架：目录结构、基础配置文件、Git 仓库与最小测试结构。）
 
 ## 4. 总体模块（规划）
 
 | 目录 | 职责 | 当前状态 |
 |---|---|---|
 | `config/` | 配置集中管理（路径、参数、运行模式） | 空包，仅占位 |
-| `database/` | SQLite 长期数据基础（schema、连接、迁移） | 空包，仅占位 |
+| `database/` | SQLite 长期数据基础（连接、事务、最小数据访问层） | 基础设施已完成，无业务表 |
 | `data/raw/` | 原始行情数据落地 | 仅目录，未实现采集 |
 | `data/processed/` | 清洗/加工后的中间数据 | 仅目录，未实现处理 |
 | `data/cache/` | 可重建的缓存（不入库） | 仅目录 |
@@ -50,7 +51,9 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 > 风控（Risk Manager）在架构上是独立模块，Strategy 不得绕过它；
 > 它会在后续阶段以独立目录/模块的形式加入，**当前尚未实现**。
 
-## 5. 本阶段（Stage 01）已完成的内容
+## 5. 各阶段已完成的内容
+
+### Stage 01 — 项目骨架
 
 - [x] 建立标准项目目录结构
 - [x] 为需要成为 Python 包的目录创建 `__init__.py`（均只有占位说明，无业务代码）
@@ -61,9 +64,17 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 - [x] 初始化 Git 仓库并完成初始提交
 - [x] `tests/`：最小测试结构（标准库 `unittest`，未引入 pytest）
 
+### Stage 02 — SQLite 数据库基础设施
+
+- [x] `database/database.py`：路径解析、连接创建/关闭、`row_factory`、`PRAGMA foreign_keys`、事务、幂等初始化
+- [x] `database/models.py`：schema 版本（存放在 SQLite 原生 `PRAGMA user_version`）与初始化语句；**本阶段不创建任何业务表**
+- [x] `database/repository.py`：最小数据访问层（`execute` / `executemany` / `query_one` / `query_all` / `transaction`）
+- [x] `data/strategy_engine.db`：可正常初始化（该文件被 `.gitignore` 忽略，不入 Git）
+- [x] `tests/test_database.py`：31 个数据库基础设施测试（文件、连接、row_factory、外键、CRUD、事务、Repository）
+
 ## 6. 后续阶段会逐步加入的内容（均尚未实现）
 
-- Stage 02 起：SQLite 数据库结构、数据表设计
+- 阶段 03 起：SQLite 业务表设计（symbols / klines / strategies / signals / orders ...）
 - 数据采集与数据清洗、原始数据入库
 - 策略框架与策略版本化管理
 - 信号生成
@@ -86,6 +97,9 @@ cd C:\Users\T14\Projects\strategy-engine
 
 # 运行入口
 .venv\Scripts\python.exe main.py
+
+# 初始化数据库（幂等，可重复执行；不创建任何业务表）
+.venv\Scripts\python.exe -c "from database import initialize_database; print(initialize_database())"
 
 # 运行全部测试
 .venv\Scripts\python.exe -m unittest discover -s tests -t . -v
