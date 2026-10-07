@@ -24,42 +24,58 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 
 ## 3. 当前开发阶段
 
-**Stage 10 — 模拟执行器（Execution Engine）基础层**
+**Stage 11 — K 线数据采集层**
 
-已建立 `execution/engine.py`，把数据层串成固定执行链：
+已建立 `data_source/`（数据源实现与 Repository 分离）：
 
+- `data_source/base.py`：最小接口 `KlineDataSource`（**只有一个方法** `fetch_klines()`）+ 标准结构 `KlineBar`
+- `data_source/http_source.py`：可配置的 **HTTP / JSON 数据源**（不绑定任何交易所）
+- `data_source/importer.py`：采集编排 `import_klines(...)`，通过现有 `KlineRepository` 写入 `klines` 表
+- 支持：`symbol` / `timeframe` / 起止时间 / 批量写入
+- **重复 K 线不会重复插入**：使用 `bulk_upsert_klines()`（已存在则更新 OHLCV）
+  + 数据库 `UNIQUE(symbol_id, timeframe, timestamp)` 兼底
+- 本阶段**未修改任何表结构**（仍是 7 张表 / `user_version = 7`）；**不接**策略、执行器、实盘
+
+### 数据源配置（密钥不入代码、不入 Git）
+
+| 环境变量 | 必填 | 说明 |
+|---|---|---|
+| `STRATEGY_ENGINE_DATA_SOURCE_URL` | 是 | API 地址 |
+| `STRATEGY_ENGINE_DATA_SOURCE_API_KEY` | 否 | 认证密钥（**通过请求头**发送，不会出现在 URL 与错误信息里） |
+| `STRATEGY_ENGINE_DATA_SOURCE_TIMEOUT` | 否 | 超时秒数，默认 10 |
+
+可参考仓库内的 `.env.example`（不含真实密钥）。请求参数名、响应路径、字段映射、时间格式
+均可通过 `config.DataSourceConfig` 配置，默认值适配「符号 + 周期 + 起止时间 → JSON 数组」的通用接口。
+
+```python
+from config import DataSourceConfig
+from data_source import HttpKlineDataSource, import_klines
+from database import KlineRepository
+
+source = HttpKlineDataSource(DataSourceConfig.from_env())
+import_klines(
+    source, KlineRepository(), symbol_id=1, symbol="BTCUSDT", timeframe="1h",
+    start_timestamp="2026-01-01 00:00:00", end_timestamp="2026-01-02 00:00:00",
+)
 ```
-Signal → Order → Trade → Position
-```
-
-- `ExecutionEngine.execute_signal(signal_id, quantity, *, price=None, fee=0.0, timestamp=None)`
-- side 由 Signal 的 direction 决定（`long → buy`、`short → sell`）；数量由调用方给出
-- 执行流程：建单（`submitted`）→ 模拟市价成交 → 写 Trade → 订单置 `filled`
-  → 按成交更新 Position → Signal 置 `executed`
-- **原子性**：整条链在**同一个事务**里完成（`database.unit_of_work()`），
-  任何一步失败都整体回滚，不会留下半完成状态
-- 持仓规则：加仓/建仓加权平均；减仓时剩余持仓平均成本不变；反手以本次成交价为准；
-  清仓归零。**不计算盈亏**，不处理资金账户、杠杆、手续费结算
-- 执行器只用现有 Repository，**内部不写 SQL**；不做市场判断
-
-**未接入**：实时行情、OKX / 券商 API、实盘交易、回测、AI、前端。本阶段仅为**模拟执行**。
 
 > **时间语义（全局约定）**：所有时间戳为 **UTC**，格式 `YYYY-MM-DD HH:MM:SS`；
 > `klines.timestamp` = K 线开始时间；`signals.timestamp` = 信号发生时间；
 > `trades.timestamp` = 成交发生时间；`orders.created_at` = 订单创建时间。
 
 （Stage 01 骨架；02 SQLite 基础；03 symbols；04 klines；05 strategies；06 signals；
-07 trades；08 positions；09 orders。）
+07 trades；08 positions；09 orders；10 模拟执行器。）
 
 ## 4. 总体模块（规划）
 
 | 目录 | 职责 | 当前状态 |
 |---|---|---|
-| `config/` | 配置集中管理（路径、参数、运行模式） | 空包，仅占位 |
+| `config/` | 配置集中管理（路径、参数、运行模式） | 已实现：数据源配置（环境变量） |
 | `database/` | SQLite 长期数据基础（连接、事务、各业务表访问层） | 基础设施 + `symbols` + `klines` + `strategies` + `signals` + `trades` + `positions` + `orders` |
-| `data/raw/` | 原始行情数据落地 | 仅目录，未实现采集 |
+| `data/raw/` | 原始行情数据落地 | 仅目录（当前采集直接写入 `klines` 表，未落地原始文件） |
 | `data/processed/` | 清洗/加工后的中间数据 | 仅目录，未实现处理 |
 | `data/cache/` | 可重建的缓存（不入库） | 仅目录 |
+| `data_source/` | 行情数据采集（数据源接口 + HTTP/JSON 实现 + 导入编排） | 已实现（Stage 11）：仅历史 K 线，无实时推送 |
 | `strategies/` | 策略实现（版本化：v1 / v2 / v3 …） | 目录为空；策略定义与版本记录已在数据库层建立，策略逻辑尚未实现 |
 | `backtest/` | 回测引擎（严格按时间顺序，禁止未来数据泄漏） | 空包，仅占位 |
 | `execution/` | 执行层（只机械执行已批准的信号，不自己判断市场） | **模拟执行器已实现**（`execution/engine.py`），无实盘 |
@@ -271,6 +287,16 @@ Signal → Order → Trade → Position
 - [x] `tests/test_execution.py`：18 个测试（完整链路、加仓/减仓/清仓/反手、订单状态、成交记录、
   持仓更新、前置校验、失败整体回滚、纯函数规则、临时库隔离）
 
+### Stage 11 — K 线数据采集层
+
+- [x] `data_source/base.py`：`KlineBar` 标准结构 + `KlineDataSource` 最小接口（单个 `fetch_klines`）+ `DataSourceError`
+- [x] `data_source/http_source.py`：`HttpKlineDataSource`（可配置 HTTP/JSON，认证走请求头，可注入 opener 便于测试）
+- [x] `data_source/importer.py`：`import_klines()` / `ImportResult`（通过 `KlineRepository` 写作，重复数据 upsert）
+- [x] `config/settings.py`：`DataSourceConfig`（环境变量读取、字段映射、时间格式、参数名）
+- [x] `.env.example`：环境变量示例（不含真实密钥）
+- [x] `tests/test_data_source.py`：30 个测试（配置、请求构造、响应解析与字段映射、
+  时间格式转换、错误处理与密钥不泄漏、写入、重复采集、时间范围、mock HTTP 端到端）
+
 #### 当前已支持
 
 - `symbols` 标的
@@ -281,23 +307,21 @@ Signal → Order → Trade → Position
 - `positions` 当前持仓
 - `orders` 订单（market / limit、五种状态）
 - **模拟执行器**：Signal → Order → Trade → Position 全链路，单事务原子、失败整体回滚
+- **K 线采集层**：可配置 HTTP/JSON 数据源 → 通过 `KlineRepository` 写入 `klines`，重复采集不重复插入
 
 #### 当前仍未实现
 
-真实行情数据源、实时行情、实盘交易（OKX / 券商 API）、回测、盈亏计算（PnL）、
-复盘、策略逻辑与信号生成、策略修改、风控（Risk Manager）、AI、API、MCP、前端。
+实时行情推送、实盘交易（OKX / 券商 API）、回测、盈亏计算（PnL）、复盘、
+策略逻辑与信号生成、策略修改、风控（Risk Manager）、AI、API、MCP、前端。
 
 ## 7. 后续阶段会逐步加入的内容（均尚未实现）
 
-- 阶段 11 起：真实行情数据接入（数据采集 / 数据清洗 / 原始数据入库）—— 当前未接入任何外部行情源
+- 阶段 12 起：实时行情 / 定时采集调度（当前只支持按需拉取历史 K 线）
 - 策略逻辑实现与信号生成（Stage 05 / 06 只建立了策略定义与信号数据层，尚无生成逻辑）
-- 风控（Risk Manager）：独立于策略放行信号（当前执行器不做风控判断）
-- 盈亏计算、复盘、回测、参数优化
-- 回测引擎
-- 风控（Risk Manager，独立于策略）
-- 模拟执行 / Paper Trading
-- 交易记录与复盘
-- 参数优化与防过拟合验证流程
+- 风控（Risk Manager）：独立于策略放行信号（当前模拟执行器不做风控判断）
+- 回测引擎与防过拟合验证（Train / Validation / Test / Walk-forward / Stress Test）
+- 盈亏计算（PnL）与交易复盘
+- 参数优化
 - AI 分析模块（DeepSeek）：只产出 Candidate 策略，不得修改 ACTIVE 策略
 - FastAPI / MCP 对外接口
 - （更远期）真实交易 —— 目前明确禁止
