@@ -1,4 +1,4 @@
-"""数据库模块：Strategy Engine 统一的数据访问层入口（Stage 02 ~ Stage 05）。
+"""数据库模块：Strategy Engine 统一的数据访问层入口（Stage 02 ~ Stage 06）。
 
 对外暴露的接口：
 
@@ -10,11 +10,13 @@
     SymbolRepository        标的基础数据访问层（symbols 表）
     KlineRepository         K 线数据访问层（klines 表）
     StrategyRepository     策略定义与版本的数据访问层（strategies 表）
+    SignalRepository       交易信号数据访问层（signals 表）
+    validation              字段级校验工具（各 Repository 共用）
     get_database_path()     默认数据库路径（data/strategy_engine.db）
     database_info()         只读状态信息，便于排查问题
 
-当前正式业务表：symbols（Stage 03）、klines（Stage 04）、strategies（Stage 05）。
-信号、订单、交易、持仓、回测等业务表尚未建立。
+当前正式业务表：symbols、klines、strategies（Stage 03~05）、signals（Stage 06）。
+订单、交易、持仓、回测等业务表尚未建立。
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from .database import (
 )
 from .kline_repository import KlineRepository
 from .repository import Repository
+from .signal_repository import SignalRepository
 from .strategy_repository import StrategyRepository
 from .symbol_repository import SymbolRepository
 
@@ -46,6 +49,7 @@ __all__ = [
     "PROJECT_ROOT",
     "KlineRepository",
     "Repository",
+    "SignalRepository",
     "StrategyRepository",
     "SymbolRepository",
     "close",

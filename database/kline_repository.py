@@ -23,13 +23,19 @@ Python 层与数据库层的职责划分：
 
 from __future__ import annotations
 
-import re
 import sqlite3
-from datetime import datetime
 from typing import Iterable, Mapping
 
 from . import models
 from .repository import Repository, enrich_error
+from .validation import (
+    optional_number,
+    require_number,
+    require_positive_int,
+    require_positive_int_limit,
+    require_timeframe,
+    require_timestamp,
+)
 
 KLINES = models.KLINES_TABLE
 
@@ -62,8 +68,6 @@ _REQUIRED_FIELDS: tuple[str, ...] = (
 
 _NUMERIC_FIELDS: tuple[str, ...] = ("open", "high", "low", "close", "volume")
 
-_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
-
 _INSERT_SQL = (
     f"INSERT INTO {KLINES} ({', '.join(_INSERT_COLUMNS)}) "
     f"VALUES ({', '.join('?' for _ in _INSERT_COLUMNS)})"
@@ -84,69 +88,9 @@ _SELECT_COLUMNS = "*"
 
 
 # --------------------------------------------------------------------------
-# 格式校验（只判断「格式错」，不判断「业务上限/下限」）
+# 格式校验：统一使用 database/validation.py（Stage 06 抽出的共享校验层），
+# 不在本模块重复实现。
 # --------------------------------------------------------------------------
-def _require_text(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field} 必须是非空字符串，实际为 {value!r}")
-    return value.strip()
-
-
-def _require_symbol_id(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"symbol_id 必须是整数，实际为 {value!r}")
-    if value <= 0:
-        raise ValueError(f"symbol_id 必须是正整数，实际为 {value!r}")
-    return value
-
-
-def _require_timeframe(value: object) -> str:
-    """周期只做最小校验：非空、无空白字符、长度合理。
-
-    故意**不**把周期限制成固定取值（1m/5m/1h/1d/1w ...），
-    因为未来会扩展 2m/3m/10m/2h/6h/12h/1M 等。
-    """
-    text = _require_text(value, "timeframe")
-    if any(ch.isspace() for ch in text):
-        raise ValueError(f"timeframe 不应包含空白字符，实际为 {value!r}")
-    if len(text) > 16:
-        raise ValueError(f"timeframe 长度异常，实际为 {value!r}")
-    return text
-
-
-def _require_timestamp(value: object) -> str:
-    """校验时间格式 'YYYY-MM-DD HH:MM:SS'（UTC），并确认是真实时间。
-
-    注意：timestamp 是 K 线的**开始时间**。
-    """
-    text = _require_text(value, "timestamp")
-    if not _TIMESTAMP_RE.match(text):
-        raise ValueError(
-            f"timestamp 格式必须是 'YYYY-MM-DD HH:MM:SS'（UTC），实际为 {value!r}"
-        )
-    try:
-        datetime.strptime(text, models.TIMESTAMP_FORMAT)
-    except ValueError as exc:
-        raise ValueError(f"timestamp 不是有效时间 {value!r}: {exc}") from exc
-    return text
-
-
-def _require_number(value: object, field: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{field} 必须是数字，实际为 {value!r}")
-    number = float(value)
-    if number != number:  # NaN
-        # SQLite 会把 NaN 静默存成 NULL，会让报错信息变得难以理解，这里提前拦住
-        raise ValueError(f"{field} 不能是 NaN")
-    return number
-
-
-def _optional_number(value: object, field: str) -> float | None:
-    if value is None:
-        return None
-    return _require_number(value, field)
-
-
 def _normalize_kline_input(row: KlineInput) -> tuple[object, ...]:
     """把一条 K 线输入校验并规范化为按 _INSERT_COLUMNS 排序的参数元组。
 
@@ -160,11 +104,11 @@ def _normalize_kline_input(row: KlineInput) -> tuple[object, ...]:
     if missing:
         raise ValueError(f"K 线数据缺少必需字段: {missing}")
 
-    symbol_id = _require_symbol_id(row["symbol_id"])
-    timeframe = _require_timeframe(row["timeframe"])
-    timestamp = _require_timestamp(row["timestamp"])
-    numbers = [_require_number(row[field], field) for field in _NUMERIC_FIELDS]
-    amount = _optional_number(row.get("amount"), "amount")
+    symbol_id = require_positive_int(row["symbol_id"], "symbol_id")
+    timeframe = require_timeframe(row["timeframe"])
+    timestamp = require_timestamp(row["timestamp"])
+    numbers = [require_number(row[field], field) for field in _NUMERIC_FIELDS]
+    amount = optional_number(row.get("amount"), "amount")
     return (symbol_id, timeframe, timestamp, *numbers, amount)
 
 
@@ -290,9 +234,9 @@ class KlineRepository(Repository):
     # ------------------------------------------------------------------ 查询
     def get_kline(self, symbol_id: int, timeframe: str, timestamp: str) -> sqlite3.Row | None:
         """按 (symbol_id, timeframe, timestamp) 查询单条 K 线。"""
-        symbol_id = _require_symbol_id(symbol_id)
-        timeframe = _require_timeframe(timeframe)
-        timestamp = _require_timestamp(timestamp)
+        symbol_id = require_positive_int(symbol_id, "symbol_id")
+        timeframe = require_timeframe(timeframe)
+        timestamp = require_timestamp(timestamp)
         return self.query_one(
             f"SELECT {_SELECT_COLUMNS} FROM {KLINES} "
             "WHERE symbol_id = ? AND timeframe = ? AND timestamp = ?",
@@ -301,8 +245,8 @@ class KlineRepository(Repository):
 
     def get_latest_kline(self, symbol_id: int, timeframe: str) -> sqlite3.Row | None:
         """返回 timestamp 最大（最新）的一条 K 线；没有数据时返回 None。"""
-        symbol_id = _require_symbol_id(symbol_id)
-        timeframe = _require_timeframe(timeframe)
+        symbol_id = require_positive_int(symbol_id, "symbol_id")
+        timeframe = require_timeframe(timeframe)
         return self.query_one(
             f"SELECT {_SELECT_COLUMNS} FROM {KLINES} "
             "WHERE symbol_id = ? AND timeframe = ? "
@@ -329,22 +273,21 @@ class KlineRepository(Repository):
             limit = N     → 返回范围内**最近的 N 条**（timestamp 最大的 N 条），
                             返回结果仍然按 timestamp 升序排列
         """
-        symbol_id = _require_symbol_id(symbol_id)
-        timeframe = _require_timeframe(timeframe)
+        symbol_id = require_positive_int(symbol_id, "symbol_id")
+        timeframe = require_timeframe(timeframe)
         where = "symbol_id = ? AND timeframe = ?"
         params: list[object] = [symbol_id, timeframe]
         if start_timestamp is not None:
             where += " AND timestamp >= ?"
-            params.append(_require_timestamp(start_timestamp))
+            params.append(require_timestamp(start_timestamp))
         if end_timestamp is not None:
             where += " AND timestamp <= ?"
-            params.append(_require_timestamp(end_timestamp))
+            params.append(require_timestamp(end_timestamp))
 
         if limit is None:
             sql = f"SELECT {_SELECT_COLUMNS} FROM {KLINES} WHERE {where} ORDER BY timestamp ASC"
         else:
-            if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
-                raise ValueError(f"limit 必须是正整数，实际为 {limit!r}")
+            require_positive_int_limit(limit)
             # 先用 DESC 取最近的 N 条，再在外层恢复升序，
             # 避免"ORDER BY ASC LIMIT N"被误当成"最近 N 条"
             sql = (
@@ -365,15 +308,15 @@ class KlineRepository(Repository):
         end_timestamp: str | None = None,
     ) -> int:
         """统计时间范围内的 K 线数量（范围语义与 list_klines 一致，闭区间）。"""
-        symbol_id = _require_symbol_id(symbol_id)
-        timeframe = _require_timeframe(timeframe)
+        symbol_id = require_positive_int(symbol_id, "symbol_id")
+        timeframe = require_timeframe(timeframe)
         where = "symbol_id = ? AND timeframe = ?"
         params: list[object] = [symbol_id, timeframe]
         if start_timestamp is not None:
             where += " AND timestamp >= ?"
-            params.append(_require_timestamp(start_timestamp))
+            params.append(require_timestamp(start_timestamp))
         if end_timestamp is not None:
             where += " AND timestamp <= ?"
-            params.append(_require_timestamp(end_timestamp))
+            params.append(require_timestamp(end_timestamp))
         row = self.query_one(f"SELECT COUNT(*) AS n FROM {KLINES} WHERE {where}", tuple(params))
         return int(row["n"]) if row is not None else 0

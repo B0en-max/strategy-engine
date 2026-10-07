@@ -83,7 +83,9 @@ class StrategySchemaTest(StrategyTestCase):
 
     def test_01_table_exists_after_initialize(self) -> None:
         self.assertTrue(self.repo.table_exists(STRATEGIES_TABLE))
-        self.assertEqual(self.repo.list_tables(), ["klines", "strategies", "symbols"])
+        # 数据库随阶段演进会继续增加业务表（Stage 06 起还有 signals），
+        # 这里只断言 strategies 存在；"没有多余/越界表" 由 test_database.py 负责
+        self.assertIn(STRATEGIES_TABLE, self.repo.list_tables())
 
     def test_02_columns_types_notnull_defaults_and_primary_key(self) -> None:
         columns = {
@@ -142,8 +144,8 @@ class StrategySchemaTest(StrategyTestCase):
             self.assertIn(f"'{status}'", sql)
 
     def test_05_schema_version_is_recorded(self) -> None:
+        # 断言数据库里的 user_version 与代码里的 SCHEMA_VERSION 一致（防止漏初始化/漏迁移）
         self.assertEqual(self.repo.query_one("PRAGMA user_version")[0], SCHEMA_VERSION)
-        self.assertEqual(SCHEMA_VERSION, 3)
 
 
 class StrategyCreateTest(StrategyTestCase):

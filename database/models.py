@@ -4,9 +4,10 @@
     symbols     —— 交易标的基础信息（Stage 03）
     klines      —— K 线（OHLCV）数据（Stage 04）
     strategies  —— 策略定义与策略版本（Stage 05）
+    signals     —— 策略产生的交易信号（Stage 06）
 
 尚未创建的后续业务表：
-    signals / orders / trades / positions / backtests / performance /
+    orders / trades / positions / backtests / performance /
     reviews / optimization_candidates
     —— 属于后续阶段，本阶段一律不建。
 
@@ -25,7 +26,7 @@ from datetime import datetime, timezone
 from typing import Final
 
 # 当前 schema 版本。后续阶段新增/修改表结构时应递增，并补上迁移逻辑。
-SCHEMA_VERSION: Final[int] = 3
+SCHEMA_VERSION: Final[int] = 4
 
 # 时间统一格式（SQLite 稳定支持，不引入第三方时间库）
 TIMESTAMP_FORMAT: Final[str] = "%Y-%m-%d %H:%M:%S"
@@ -36,12 +37,14 @@ TIMESTAMP_FORMAT: Final[str] = "%Y-%m-%d %H:%M:%S"
 SYMBOLS_TABLE: Final[str] = "symbols"
 KLINES_TABLE: Final[str] = "klines"
 STRATEGIES_TABLE: Final[str] = "strategies"
+SIGNALS_TABLE: Final[str] = "signals"
 
 # 数据库初始化后应当存在的业务表（后续阶段新增表时在这里登记）
 BUSINESS_TABLES: Final[tuple[str, ...]] = (
     SYMBOLS_TABLE,
     KLINES_TABLE,
     STRATEGIES_TABLE,
+    SIGNALS_TABLE,
 )
 
 # ---------------------------------------------------------------------------
@@ -152,6 +155,55 @@ CREATE TABLE IF NOT EXISTS {STRATEGIES_TABLE} (
 """
 
 
+# ---------------------------------------------------------------------------
+# signals：策略产生的交易信号
+#
+# 设计要点：
+#   1. strategy_id → strategies(id)、symbol_id → symbols(id)，两者都是真实外键；
+#      删除被引用的策略/标的会被 SQLite 外键机制拦下，
+#      **不在 Python 层重复实现一套外键检查**。
+#   2. direction 只能是 long / short；status 只能是
+#      pending / executed / cancelled（数据库 CHECK 与 Python 校验共用同一来源）。
+#   3. timestamp 表示**信号发生时间**（UTC，格式与其他表一致）。
+#   4. price 是信号触发时记录的价格；reason 允许为空（自然语言说明）。
+#   5. 本表没有唯一约束，因此不存在“唯一约束已生成隐式索引”的情况；
+#      根据查询需求（按 strategy / symbol / timeframe / status 筛选并按时间排序）
+#      显式建立一个复合索引，见 CREATE_SIGNALS_INDEX_SQL。
+# ---------------------------------------------------------------------------
+SIGNAL_DIRECTIONS: Final[tuple[str, ...]] = ("long", "short")
+SIGNAL_STATUSES: Final[tuple[str, ...]] = ("pending", "executed", "cancelled")
+DEFAULT_SIGNAL_STATUS: Final[str] = "pending"
+
+_SIGNAL_DIRECTION_SQL_LIST: Final[str] = ", ".join(f"'{d}'" for d in SIGNAL_DIRECTIONS)
+_SIGNAL_STATUS_SQL_LIST: Final[str] = ", ".join(f"'{s}'" for s in SIGNAL_STATUSES)
+
+CREATE_SIGNALS_TABLE_SQL: Final[str] = f"""
+CREATE TABLE IF NOT EXISTS {SIGNALS_TABLE} (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_id INTEGER NOT NULL REFERENCES {STRATEGIES_TABLE}(id),
+    symbol_id   INTEGER NOT NULL REFERENCES {SYMBOLS_TABLE}(id),
+    timeframe   TEXT    NOT NULL,
+    timestamp   TEXT    NOT NULL,
+    direction   TEXT    NOT NULL,
+    price       REAL    NOT NULL,
+    reason      TEXT,
+    status      TEXT    NOT NULL DEFAULT '{DEFAULT_SIGNAL_STATUS}',
+    created_at  TEXT    NOT NULL DEFAULT (strftime('{TIMESTAMP_FORMAT}', 'now')),
+    CONSTRAINT ck_signals_direction CHECK (direction IN ({_SIGNAL_DIRECTION_SQL_LIST})),
+    CONSTRAINT ck_signals_status CHECK (status IN ({_SIGNAL_STATUS_SQL_LIST}))
+)
+"""
+
+# 索引说明：signals 表没有唯一约束（也就没有隐式索引），而最常见的查询是
+# 「某策略 / 某标的 / 某周期 的信号，按时间排序」，所以显式建立这个复合索引。
+# SQLite 的索引条目尾部隐含 rowid，因此它天然满足 ORDER BY timestamp, id，
+# 不会再额外产生排序开销。本索引不与任何已有索引重复。
+CREATE_SIGNALS_INDEX_SQL: Final[str] = f"""
+CREATE INDEX IF NOT EXISTS idx_signals_strategy_symbol_timeframe_timestamp
+    ON {SIGNALS_TABLE} (strategy_id, symbol_id, timeframe, timestamp)
+"""
+
+
 def utc_now_str() -> str:
     """返回当前 UTC 时间字符串（统一格式 TIMESTAMP_FORMAT）。"""
     return datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT)
@@ -168,5 +220,7 @@ def initialization_statements() -> list[tuple[str, tuple[object, ...]]]:
         (CREATE_SYMBOLS_TABLE_SQL, ()),
         (CREATE_KLINES_TABLE_SQL, ()),
         (CREATE_STRATEGIES_TABLE_SQL, ()),
+        (CREATE_SIGNALS_TABLE_SQL, ()),
+        (CREATE_SIGNALS_INDEX_SQL, ()),
         (f"PRAGMA user_version = {SCHEMA_VERSION:d}", ()),
     ]

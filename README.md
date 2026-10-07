@@ -24,27 +24,30 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 
 ## 3. 当前开发阶段
 
-**Stage 05 — 策略定义基础模块**
+**Stage 06 — 交易信号（Signal）数据层**
 
-已建立策略定义表 `strategies` 与 `StrategyRepository`：
+已建立信号表 `signals` 与 `SignalRepository`：
 
-- **策略版本化**：每个版本都是独立记录（`(name, version)` 唯一），不靠修改原记录来“模拟版本”；
-  未来复盘时可以准确知道当时用的是哪个策略版本
-- **配置**：`config` 以 JSON 文本存储（`dict` ⇄ `json.dumps`/`json.loads`，不依赖 SQLite JSON1）
-- **状态**：`draft` / `testing` / `active` / `retired`（数据库 CHECK + Python 双重保证，非法值不静默转换）
+- **引用完整性**：`strategy_id → strategies(id)`、`symbol_id → symbols(id)` 均为真实外键，
+  由数据库强制（不复制一套 Python 外键检查）
+- **direction**：`long` / `short`；**status**：`pending` / `executed` / `cancelled`（默认 `pending`）
+- **索引**：本表没有唯一约束，因此根据查询需求显式建立复合索引
+  `(strategy_id, symbol_id, timeframe, timestamp)`，并用 `EXPLAIN QUERY PLAN` 实测生效
+- 本阶段只建立**信号数据层**，**尚无信号生成逻辑**，也未接入任何真实行情数据源
 
 > **时间语义（全局约定）**：所有时间戳为 **UTC**，格式 `YYYY-MM-DD HH:MM:SS`；
-> `klines.timestamp` 表示该根 K 线的**开始时间**（不是结束时间）；`created_at` 表示记录**进入数据库**的时间。
-> **本阶段仍不接入任何真实行情数据源。**
+> `klines.timestamp` 表示该根 K 线的**开始时间**（不是结束时间）；
+> `signals.timestamp` 表示**信号发生时间**；`created_at` 表示记录**进入数据库**的时间。
 
-（Stage 01 项目骨架；Stage 02 SQLite 连接/事务/最小数据访问层；Stage 03 symbols；Stage 04 klines。）
+（Stage 01 骨架；Stage 02 SQLite 连接/事务/最小数据访问层；Stage 03 symbols；
+Stage 04 klines；Stage 05 strategies。）
 
 ## 4. 总体模块（规划）
 
 | 目录 | 职责 | 当前状态 |
 |---|---|---|
 | `config/` | 配置集中管理（路径、参数、运行模式） | 空包，仅占位 |
-| `database/` | SQLite 长期数据基础（连接、事务、各业务表访问层） | 基础设施 + `symbols` + `klines` + `strategies` |
+| `database/` | SQLite 长期数据基础（连接、事务、各业务表访问层） | 基础设施 + `symbols` + `klines` + `strategies` + `signals` |
 | `data/raw/` | 原始行情数据落地 | 仅目录，未实现采集 |
 | `data/processed/` | 清洗/加工后的中间数据 | 仅目录，未实现处理 |
 | `data/cache/` | 可重建的缓存（不入库） | 仅目录 |
@@ -104,6 +107,15 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 - [x] `database/__init__.py`：对外导出 `StrategyRepository`
 - [x] `tests/test_strategies.py`：49 个测试（Schema、唯一性、版本、状态、config JSON round trip 与非法类型、更新隔离、时间字段、持久化）
 
+### Stage 06 — 交易信号（Signal）数据层
+
+- [x] `database/validation.py`：抽出共享字段校验层（类型 / 非空 / 时间格式 / 数字 / 取值集合），供各 Repository 复用
+- [x] `database/kline_repository.py`：改用共享校验层，删除模块内重复的校验实现
+- [x] `database/models.py`：新增 `signals` 表（schema 版本 → 4）；两个真实外键 + `CHECK(direction)` + `CHECK(status)`；并建立复合索引
+- [x] `database/signal_repository.py`：`SignalRepository`（create / get / list / update_status / count）
+- [x] `database/__init__.py`：对外导出 `SignalRepository`
+- [x] `tests/test_signals.py`：41 个测试（Schema、外键、direction、status、创建与查询、list 过滤、status 更新、count、持久化）
+
 #### 当前已支持
 
 - `symbols` 标的
@@ -112,16 +124,17 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 - **strategy version**（每个版本独立记录）
 - **strategy config**（JSON 文本）
 - **strategy status**（draft / testing / active / retired）
+- `signals` 交易信号（含策略 / 标的引用、long / short、pending / executed / cancelled）
 
 #### 当前仍未实现
 
-信号、回测、订单、持仓、执行、复盘、策略优化、AI、API、MCP、实盘交易、外部行情数据源（Tushare / AKShare / Binance / OKX 等均未接入）。
+执行、复盘、策略修改、回测、真实行情数据源、实盘交易、AI、API、MCP
+（也尚无信号生成逻辑：本阶段只建立了信号**数据层**）。
 
 ## 6. 后续阶段会逐步加入的内容（均尚未实现）
 
-- 阶段 06 起：真实行情数据接入（数据采集 / 数据清洗 / 原始数据入库）—— 当前未接入任何外部行情源
-- 策略逻辑实现（Stage 05 只建立了策略定义与版本记录，尚无任何策略逻辑）
-- 信号生成
+- 阶段 07 起：真实行情数据接入（数据采集 / 数据清洗 / 原始数据入库）—— 当前未接入任何外部行情源
+- 策略逻辑实现与信号生成（Stage 05 / 06 只建立了策略定义与信号数据层，尚无生成逻辑）
 - 回测引擎
 - 风控（Risk Manager，独立于策略）
 - 模拟执行 / Paper Trading
