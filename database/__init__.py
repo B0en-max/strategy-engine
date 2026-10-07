@@ -7,6 +7,7 @@
     connection()            连接上下文：提交 / 回滚 / 自动关闭
     transaction()           在已有连接上开启显式事务
     Repository              最小数据访问层
+    SymbolRepository        标的基础数据访问层（symbols 表）
     get_database_path()     默认数据库路径（data/strategy_engine.db）
     database_info()         只读状态信息，便于排查问题
 
@@ -31,6 +32,7 @@ from .database import (
     transaction,
 )
 from .repository import Repository
+from .symbol_repository import SymbolRepository
 
 __all__ = [
     "DEFAULT_DATA_DIR",
@@ -38,6 +40,7 @@ __all__ = [
     "DEFAULT_DB_PATH",
     "PROJECT_ROOT",
     "Repository",
+    "SymbolRepository",
     "close",
     "connect",
     "connection",

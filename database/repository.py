@@ -36,8 +36,8 @@ def _describe_error(exc: sqlite3.Error, sql: str, params: SqlParams | None) -> s
     return f"{exc} | SQL={sql!r} | params={params!r}"
 
 
-def _enrich_error(exc: sqlite3.Error, sql: str, params: SqlParams | None) -> sqlite3.Error:
-    """构造一个补充了上下文的新异常。
+def enrich_error(exc: sqlite3.Error, sql: str, params: SqlParams | None) -> sqlite3.Error:
+    """构造一个补充了上下文的新异常（供各 Repository 复用）。
 
     关键点：保留**原始异常类型**（如 sqlite3.IntegrityError /
     sqlite3.OperationalError），否则调用方将无法区分约束冲突与语法错误。
@@ -96,7 +96,7 @@ class Repository:
                 cursor = conn.execute(sql, () if params is None else params)
                 return cursor.rowcount
             except sqlite3.Error as exc:
-                raise _enrich_error(exc, sql, params) from exc
+                raise enrich_error(exc, sql, params) from exc
 
     def executemany(
         self,
@@ -115,7 +115,7 @@ class Repository:
                     affected = cursor.rowcount
                 except sqlite3.Error as exc:
                     # 事务上下文负责回滚，这里只补充上下文并抛出（保留异常类型）
-                    raise _enrich_error(exc, sql, rows) from exc
+                    raise enrich_error(exc, sql, rows) from exc
         return affected
 
     # ----------------------------------------------------------------- 查询
@@ -132,7 +132,7 @@ class Repository:
             try:
                 cursor = conn.execute(sql, () if params is None else params)
             except sqlite3.Error as exc:
-                raise _enrich_error(exc, sql, params) from exc
+                raise enrich_error(exc, sql, params) from exc
             return cursor.fetchall() if many else cursor.fetchone()
 
     # ----------------------------------------------------------- 基础设施查询

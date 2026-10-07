@@ -24,17 +24,18 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 
 ## 3. 当前开发阶段
 
-**Stage 02 — SQLite 数据库基础设施**
+**Stage 03 — Symbols 标的基础数据模块**
 
-已建立 SQLite 连接管理、事务与最小数据访问层；**当前数据库中没有任何业务表**。
-（Stage 01 已完成项目骨架：目录结构、基础配置文件、Git 仓库与最小测试结构。）
+已建立标的基础信息表 `symbols`（id / symbol / name / market / asset_type / is_active / created_at / updated_at）
+及其数据访问层 `SymbolRepository`。标的身份是「market + symbol」的组合；停用采用逻辑停用（`is_active = 0`），不提供物理删除。
+（Stage 01 项目骨架，Stage 02 SQLite 连接/事务/最小数据访问层。）
 
 ## 4. 总体模块（规划）
 
 | 目录 | 职责 | 当前状态 |
 |---|---|---|
 | `config/` | 配置集中管理（路径、参数、运行模式） | 空包，仅占位 |
-| `database/` | SQLite 长期数据基础（连接、事务、最小数据访问层） | 基础设施已完成，无业务表 |
+| `database/` | SQLite 长期数据基础（连接、事务、各业务表访问层） | 基础设施 + `symbols` 表 |
 | `data/raw/` | 原始行情数据落地 | 仅目录，未实现采集 |
 | `data/processed/` | 清洗/加工后的中间数据 | 仅目录，未实现处理 |
 | `data/cache/` | 可重建的缓存（不入库） | 仅目录 |
@@ -72,9 +73,17 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 - [x] `data/strategy_engine.db`：可正常初始化（该文件被 `.gitignore` 忽略，不入 Git）
 - [x] `tests/test_database.py`：31 个数据库基础设施测试（文件、连接、row_factory、外键、CRUD、事务、Repository）
 
+### Stage 03 — Symbols 标的基础数据模块
+
+- [x] `database/models.py`：新增 `symbols` 表定义（schema 版本 → 1），初始化时幂等建表
+- [x] `database/symbol_repository.py`：`SymbolRepository`（创建 / 单查 / 全查 / 启用查询 / 更新 / 逻辑停用）
+- [x] `database/repository.py`：错误上下文工具改为公开 `enrich_error()`，供各 Repository 复用
+- [x] `database/__init__.py`：对外导出 `SymbolRepository`
+- [x] `tests/test_symbols.py`：31 个测试（建表、创建、查询、唯一性、必填字段、默认值、更新、逻辑停用、持久化、SQL 约束）
+
 ## 6. 后续阶段会逐步加入的内容（均尚未实现）
 
-- 阶段 03 起：SQLite 业务表设计（symbols / klines / strategies / signals / orders ...）
+- 阶段 04 起：K线 / 行情数据（klines、OHLCV）与数据采集、数据清洗
 - 数据采集与数据清洗、原始数据入库
 - 策略框架与策略版本化管理
 - 信号生成
