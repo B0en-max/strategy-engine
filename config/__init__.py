@@ -10,12 +10,14 @@
     STRATEGY_ENGINE_DATA_SOURCE_URL        数据源 API 地址（必填）
     STRATEGY_ENGINE_DATA_SOURCE_API_KEY    认证密钥（可选）
     STRATEGY_ENGINE_DATA_SOURCE_TIMEOUT    超时秒数（可选）
+    STRATEGY_ENGINE_DB_PATH                数据库路径覆盖（可选；API 层等入口统一从这里读）
 """
 
 from .settings import (
     DEFAULT_FIELD_MAPPING,
     ENV_API_KEY,
     ENV_BASE_URL,
+    ENV_DB_PATH,
     ENV_TIMEOUT,
     TIMESTAMP_FORMATS,
     DataSourceConfig,
@@ -26,6 +28,7 @@ __all__ = [
     "DEFAULT_FIELD_MAPPING",
     "ENV_API_KEY",
     "ENV_BASE_URL",
+    "ENV_DB_PATH",
     "ENV_TIMEOUT",
     "TIMESTAMP_FORMATS",
     "ConfigError",

@@ -24,56 +24,77 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 
 ## 3. 当前开发阶段
 
-**Stage 15 — 基础回测绩效统计（Backtest Metrics）**
+**Stage 16 — 执行器 API 层**
 
-已建立 `backtest/metrics.py`：只做「回测结果 → 绩效指标」，**不改变 Stage 14 的回测执行逻辑**，
-也不重复实现策略计算 / 信号生成 / 模拟成交。
+已建立 `api/`（FastAPI）：把 `StrategyRunner` / `ExecutionEngine` 封装成稳定的 HTTP 接口，
+供下一阶段前端调用。**本层只做参数校验、资源存在性检查与 JSON 转换**。
 
-- `compute_metrics(trades)`：从成交序列算指标（纯函数，不访问数据库）
-- `realized_trades(trades)`：逐笔审计——识别 **开多 / 加多 / 平多 / 减多 / 开空 / 加空 / 平空 / 减空 / 反转**，
-  并给出每笔结算的已实现盈亏
-- `run_backtest_with_metrics(engine, strategy_id, symbol_id, timeframe, ...)`：跑一次回测并给出 `(BacktestResult, BacktestMetrics)`
+```
+Frontend → API → StrategyRunner / ExecutionEngine → Repository → SQLite
+```
 
-指标（`BacktestMetrics`）：`total_trades` / `buy_trades` / `sell_trades` / `winning_trades` /
-`losing_trades` / `total_pnl` / `win_rate` / `average_profit` / `average_loss` / `profit_factor`。
+### 如何启动 API（本地开发）
 
-**盈亏口径（保持最小化）**：只算**已实现**盈亏（未平仓浮盈不计）；不计手续费 / 滑点 / 资金 / 杠杆 / 保证金；
-多头 = 卖出平仓价 − 买入成本价，空头 = 卖出开仓价 − 买入平仓价；成本用**持仓平均成本**，部分平仓只结算对应部分。
+```powershell
+# 1) 安装依赖（FastAPI / uvicorn；测试另需 httpx）
+.venv\Scripts\python.exe -m pip install -r requirements.txt
 
-口径细节（避免误读）：
+# 2) 启动（默认读取项目默认库 data/strategy_engine.db）
+.venv\Scripts\python.exe -m uvicorn api.app:app --host 127.0.0.1 --port 8000
 
-| 指标 | 口径 |
-|---|---|
-| `winning_trades` / `losing_trades` | 只统计**平仓成交**（含反转中先平掉的那部分）；只开仓/加仓的成交不计入；盈亏恰为 0 的平仓也不计入 |
-| `win_rate` | `winning_trades / (winning_trades + losing_trades)`，无平仓成交时为 0 |
-| `average_profit` | 盈利成交的均值；无盈利时为 0 |
-| `average_loss` | 亏损成交的均值（**负值**）；无亏损时为 0 |
-| `profit_factor` | `总盈利 / |总亏损|`；有盈利且无亏损时为 `inf`；无盈利时为 0 |
-| `total_pnl` | 所有平仓成交已实现盈亏之和（不含未平仓浮盈） |
+# 可选：用环境变量指定数据库路径（不写死在代码里）
+$env:STRATEGY_ENGINE_DB_PATH = "C:\path\to\strategy_engine.db"
+```
 
-### 本次人工验收（真实 600519 K 线，全程只操作临时库）
+启动后可打开交互式文档：<http://127.0.0.1:8000/docs>；健康检查 `GET /health`。
 
-| 周期 | total_trades | 买 / 卖 | 盈利 / 亏损 | total_pnl | win_rate | average_profit | average_loss | profit_factor |
-|---|---|---|---|---|---|---|---|---|
-| 15m | 319 | 138 / 181 | 112 / 26 | 809.18 | 81.16% | 8.18 | -4.12 | 8.55 |
-| 1d | 59 | 28 / 31 | 13 / 15 | 12.79 | 46.43% | 20.53 | -16.94 | 1.05 |
+### 主要用途
 
-（15m 的 319 笔成交中只有 138 笔带平仓、其余 181 笔为开仓/加仓，符合“只有平仓才结算盈亏”的口径；
-末仓 -43 / -3 未平仓，其浮盈未计入 `total_pnl`。正式库前后完全一致，未被修改。）
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/health` | 健康检查（含当前数据库路径） |
+| GET | `/strategies` | 策略列表（`config` 已还原为 dict） |
+| GET | `/symbols` | 标的列表（`market` / `active_only`） |
+| GET | `/klines` | 指定标的 K 线（`symbol_id` / `timeframe` / 时间范围 / `limit`） |
+| POST | `/strategies/{strategy_id}/run` | 运行策略产生信号（`symbol_id` / `timeframe` / 可选时间范围） |
+| GET | `/strategies/{strategy_id}/signals` | 指定策略的信号（可按 `symbol_id` / `timeframe` / `status` 过滤） |
+| POST | `/execution/signals/{signal_id}` | **模拟执行**指定信号（`quantity` 必填、`price` 可选） |
+| GET | `/positions` | 当前持仓（可按 `symbol_id` 过滤） |
+| GET | `/orders` | 订单（按 `symbol_id` / `signal_id` / `status` / `limit` 过滤） |
+| GET | `/trades` | 成交（按 `symbol_id` / `signal_id` / `side` / `limit` 过滤） |
+
+错误约定：`404` 资源不存在（策略/标的/信号）、`409` 状态冲突或约束冲突（如非 pending 信号重复执行）、
+`400` 业务参数错误、`422` 请求体不符合 schema；其它异常不吞，交框架记录堆栈。
+
+### 当前定位（重要）
+
+- **仍然是本地模拟执行**：`POST /execution/signals/...` 只会写本地的 `orders` / `trades` / `positions`
+- **尚未连接任何真实交易所 / 券商**：没有下单 API、没有资金账户、没有实盘通道
+- **仅用于本地开发**：不做登录、用户、权限、HTTPS、公网部署
+- 本层**不重复实现**策略逻辑、订单逻辑、成交逻辑、持仓计算（全部复用已有组件）
+
+### 本次冒烟验证（真实启动 uvicorn，环境变量指向临时库）
+
+`/health` → `db_path` 为临时库；`/symbols`、`/klines` 正常；
+`POST /strategies/1/run` → 真实 320 根 K 线产生 319 条信号；
+`POST /execution/signals/1` → 生成 order(filled) / trade / position（持仓 -2.0 @1293.07）；
+重复执行同一信号 → `409`；不存在的策略/标的/信号 → `404`；`quantity=0` → `422`。
+正式库在全程未被修改。
 
 > **时间语义（全局约定）**：所有时间戳为 **UTC**，格式 `YYYY-MM-DD HH:MM:SS`；
 > `klines.timestamp` = K 线开始时间；`signals.timestamp` = 信号发生时间；
-> `trades.timestamp` = 成交发生时间（回测中 = 信号所在 K 线时间）；`orders.created_at` = 订单创建时间。
+> `trades.timestamp` = 成交发生时间（回测中 = 信号所在 K 线时间；模拟执行时为执行时刻）；
+> `orders.created_at` = 订单创建时间。
 
 （Stage 01 骨架；02 SQLite 基础；03 symbols；04 klines；05 strategies；06 signals；
 07 trades；08 positions；09 orders；10 模拟执行器；11 K 线采集层；12 真实数据源；
-13 策略运行器；14 基础回测引擎。）
+13 策略运行器；14 基础回测引擎；15 基础绩效统计。）
 
 ## 4. 总体模块（规划）
 
 | 目录 | 职责 | 当前状态 |
 |---|---|---|
-| `config/` | 配置集中管理（路径、参数、运行模式） | 已实现：数据源配置（环境变量） |
+| `config/` | 配置集中管理（路径、参数、运行模式） | 已实现：数据源配置 + 数据库路径覆盖（环境变量） |
 | `database/` | SQLite 长期数据基础（连接、事务、各业务表访问层） | 基础设施 + `symbols` + `klines` + `strategies` + `signals` + `trades` + `positions` + `orders` |
 | `data/raw/` | 原始行情数据落地 | 仅目录（当前采集直接写入 `klines` 表，未落地原始文件） |
 | `data/processed/` | 清洗/加工后的中间数据 | 仅目录，未实现处理 |
@@ -84,7 +105,7 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 | `execution/` | 执行层（只机械执行已批准的信号，不自己判断市场） | **模拟执行器已实现**（`execution/engine.py`），无实盘 |
 | `review/` | 交易记录与复盘 | 空包，仅占位 |
 | `optimization/` | 参数寻优、防过拟合验证（Train/Validation/Test/Walk-forward） | 空包，仅占位 |
-| `api/` | 对外 API，供 AI 工作台 / MCP 调用 | 空包，仅占位 |
+| `api/` | 对外 API，供前端 / 后续 AI 工作台与 MCP 调用 | 已实现（FastAPI；本地模拟执行，未接真实交易所） |
 | `tests/` | 测试 | 已可用 |
 | `logs/` | 运行日志 | 仅目录 |
 | `main.py` | 最小可运行入口 | 已完成 |
@@ -358,6 +379,22 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
   另有引擎集成 6 例与正式库只读校验）
 - [x] 人工验收：真实 600519 K 线上的回测绩效（见第 3 节），正式库未被修改
 
+### Stage 16 — 执行器 API 层
+
+- [x] `api/app.py`：`create_app(db_path=None)` + 10 个接口（健康检查 / 策略 / 标的 / K 线 /
+  运行策略 / 信号 / 模拟执行 / 持仓 / 订单 / 成交）
+- [x] `api/schemas.py`：`RunStrategyRequest` / `ExecuteSignalRequest`（pydantic 入参校验）
+- [x] `api/__init__.py`：对外导出 `create_app`
+- [x] 错误映射：404（策略/标的/信号不存在）、409（非 pending 信号、约束冲突）、
+  400（业务参数错误）、422（schema 不符）；不吞未预期异常
+- [x] 数据库路径从 `config.ENV_DB_PATH` / 显式入参解析，**不在 API 代码里写死绝对路径**
+- [x] `config/settings.py`：新增 `ENV_DB_PATH` 常量
+- [x] `requirements.txt`：加入 `fastapi` / `uvicorn`（运行时）与 `httpx`（仅测试）
+- [x] `tests/test_api.py`：24 个测试（策略列表、标的列表、K 线查询、策略运行、
+  信号查询与过滤、模拟执行、持仓/订单/成交查询、404/409/400/422、
+  **正式库只读校验**、全部使用临时库）
+- [x] 真实启动 uvicorn 完成冒烟验证（见第 3 节），正式库未被修改
+
 #### 当前已支持
 
 - `symbols` 标的
@@ -372,24 +409,25 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 - **K 线采集层**：可配置 HTTP/JSON 数据源（已接入新浪财经）→ 写入 `klines`，重复采集不重复插入
 - **基础回测引擎**：K 线 → 信号 → 模拟成交 → 订单/成交/持仓 → 回测结果（独立临时库，正式库只读）
 - **基础绩效统计**：已实现盈亏、盈亏笔数、胜率、平均盈亏、profit factor（逐笔可审计）
+- **执行器 API 层**：FastAPI 接口供前端调用（本地模拟执行）
 
 #### 当前仍未实现
 
-实时行情推送与定时采集、自动交易（无人值守）、风控（Risk Manager）、
+前端界面、实时行情推送与定时采集、无人值守自动交易、风控（Risk Manager）、
 回测增强（手续费 / 滑点 / 资金管理 / 杠杆 / 防过拟合流程）、
 浮盈与资金曲线、Sharpe / 最大回撤等复杂风险指标、交易复盘、复杂指标与最终交易策略、
-AI、API、MCP、前端、实盘交易。
+AI、MCP、实盘交易（**未连接任何真实交易所**）。
 
 ## 7. 后续阶段会逐步加入的内容（均尚未实现）
 
-- 阶段 16 起：实时行情 / 定时采集调度（当前只支持手动按需拉取历史 K 线）
+- 阶段 17（下一阶段）：**执行器前端**（第一版界面：查看策略/信号/持仓，运行策略、模拟执行信号）
 - 自动化串联：定时跑策略 → 风控 → 模拟执行（当前各环节需手动调用）
 - 风控（Risk Manager）：独立于策略放行信号（当前模拟执行器不做风控判断）
 - 回测增强：手续费 / 滑点 / 资金管理 / 杠杆、浮盈与资金曲线、Sharpe / 最大回撤等风险指标、防过拟合验证（Train / Validation / Test / Walk-forward / Stress Test）
 - 盈亏计算：已实现盈亏已在 Stage 15 实现；浮盈、资金曲线与复杂风险指标尚未实现
 - 参数优化
 - AI 分析模块（DeepSeek）：只产出 Candidate 策略，不得修改 ACTIVE 策略
-- FastAPI / MCP 对外接口
+- FastAPI 已实现（本地开发用）；MCP 对接尚未实现
 - （更远期）真实交易 —— 目前明确禁止
 
 ## 8. 开发与运行方式
@@ -409,8 +447,12 @@ cd C:\Users\T14\Projects\strategy-engine
 # 运行全部测试
 .venv\Scripts\python.exe -m unittest discover -s tests -t . -v
 
-# 安装依赖（当前阶段不会安装任何东西）
+# 安装依赖（FastAPI / uvicorn；测试另需 httpx）
 .venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# 启动 API（本地开发；默认库 data/strategy_engine.db）
+.venv\Scripts\python.exe -m uvicorn api.app:app --host 127.0.0.1 --port 8000
+# 交互式文档：http://127.0.0.1:8000/docs
 ```
 
 ### 行情数据导入（Stage 12 接入的数据源）

@@ -15,6 +15,9 @@ ENV_BASE_URL: Final[str] = "STRATEGY_ENGINE_DATA_SOURCE_URL"
 ENV_API_KEY: Final[str] = "STRATEGY_ENGINE_DATA_SOURCE_API_KEY"
 ENV_TIMEOUT: Final[str] = "STRATEGY_ENGINE_DATA_SOURCE_TIMEOUT"
 
+#: 数据库路径覆盖（可选）：API 层与其它入口都从这里读，不写死绝对路径
+ENV_DB_PATH: Final[str] = "STRATEGY_ENGINE_DB_PATH"
+
 #: 时间格式取值：秒级时间戳 / 毫秒级时间戳 / 'YYYY-MM-DD HH:MM:SS'（UTC）
 TIMESTAMP_FORMATS: Final[tuple[str, ...]] = ("seconds", "milliseconds", "datetime")
 
