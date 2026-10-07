@@ -12,12 +12,14 @@ import { describe, expect, it, vi } from 'vitest'
 import App from '../src/App.jsx'
 import ExecutionPanel from '../src/components/ExecutionPanel.jsx'
 import ErrorBanner from '../src/components/ErrorBanner.jsx'
+import KlineChartPanel from '../src/components/KlineChartPanel.jsx'
 import OrdersPanel from '../src/components/OrdersPanel.jsx'
 import PositionsPanel from '../src/components/PositionsPanel.jsx'
 import SignalsPanel from '../src/components/SignalsPanel.jsx'
 import StrategyRunnerPanel from '../src/components/StrategyRunnerPanel.jsx'
 import TradesPanel from '../src/components/TradesPanel.jsx'
 import { formatNumber, formatTimestamp, indexById, symbolLabel } from '../src/format.js'
+import { toChartTime } from '../src/chart/klines.js'
 
 const render = (element) => renderToStaticMarkup(element)
 const noop = () => {}
@@ -302,6 +304,74 @@ describe('持仓 / 订单 / 成交面板', () => {
     )
     expect(html).toContain('2026-09-02 09:45:00')
     expect(html).toContain('buy')
+  })
+})
+
+describe('KlineChartPanel（Stage 18）', () => {
+  const chartProps = {
+    symbolsById,
+    symbolId: 1,
+    timeframe: '15m',
+    loading: false,
+    error: null,
+    onRefresh: noop,
+    onSelectSignal: noop,
+    candles: [
+      {
+        time: toChartTime('2026-09-30 14:45:00'),
+        open: 1258.19,
+        high: 1258.62,
+        low: 1255.86,
+        close: 1258.62,
+        timestamp: '2026-09-30 14:45:00',
+      },
+    ],
+  }
+
+  it('渲染图表外壳、图例与信号匹配统计', () => {
+    const html = render(
+      <KlineChartPanel
+        {...chartProps}
+        signals={[
+          {
+            id: 300,
+            timestamp: '2026-09-30 14:45:00',
+            direction: 'long',
+            price: 1258.62,
+            status: 'pending',
+            reason: 'close 1258.19 -> 1258.62',
+          },
+          {
+            id: 900,
+            timestamp: '2026-09-01 09:30:00',
+            direction: 'long',
+            price: 1,
+            status: 'pending',
+            reason: null,
+          },
+        ]}
+      />,
+    )
+    expect(html).toContain('K 线（Klines）')
+    expect(html).toContain('600519 贵州茅台')
+    expect(html).toContain('2026-09-30 14:45:00 UTC')
+    expect(html).toContain('1258.62') // 图例中的 OHLC 来自接口数据
+    expect(html).toContain('已落在图上')
+    expect(html).toContain('不在当前 K 线范围 1 条')
+    expect(html).toContain('chart-body')
+    expect(html).toContain('刷新 K 线')
+  })
+
+  it('无 K 线时给出空态提示', () => {
+    const html = render(<KlineChartPanel {...chartProps} candles={[]} signals={[]} />)
+    expect(html).toContain('没有 K 线数据')
+  })
+
+  it('加载失败时显示错误', () => {
+    const html = render(
+      <KlineChartPanel {...chartProps} candles={[]} signals={[]} error="无法连接 API" />,
+    )
+    expect(html).toContain('K 线加载失败：无法连接 API')
   })
 })
 

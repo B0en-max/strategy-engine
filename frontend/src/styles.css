@@ -334,3 +334,48 @@ td.reason {
 .result dd {
   margin: 0;
 }
+
+/* ---------------------------------------------------------------- K 线图（Stage 18）*/
+.chart-panel {
+  padding-bottom: 8px;
+}
+
+.chart-legend {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 2px 0 8px;
+  font-size: 12px;
+}
+
+.chart-legend b {
+  font-weight: 600;
+}
+
+.chart-stats {
+  margin-left: auto;
+}
+
+.chart-body {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.signal-detail {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+
+.signal-detail-head {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.signal-detail table {
+  font-size: 12px;
+}

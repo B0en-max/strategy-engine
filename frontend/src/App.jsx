@@ -14,11 +14,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 
 import * as api from './api/client.js'
+import { CHART_SIGNAL_LIMIT, DEFAULT_KLINE_LIMIT, buildCandles } from './chart/klines.js'
 import { API_BASE_URL, SIGNALS_REFRESH_INTERVAL_MS } from './config.js'
 import { indexById } from './format.js'
 import ErrorBanner from './components/ErrorBanner.jsx'
 import ExecutionPanel from './components/ExecutionPanel.jsx'
 import HealthBar from './components/HealthBar.jsx'
+import KlineChartPanel from './components/KlineChartPanel.jsx'
 import OrdersPanel from './components/OrdersPanel.jsx'
 import PositionsPanel from './components/PositionsPanel.jsx'
 import SignalsPanel from './components/SignalsPanel.jsx'
@@ -60,6 +62,10 @@ export default function App() {
   })
   const [selectedSignalId, setSelectedSignalId] = useState(null)
 
+  // --- K 线（图表，Stage 18）-------------------------------------------
+  const [klines, setKlines] = useState([])
+  const [klinesState, setKlinesState] = useState({ loading: false, error: null })
+
   // --- 模拟执行 ---------------------------------------------------------
   const [quantity, setQuantity] = useState('1')
   const [price, setPrice] = useState('')
@@ -77,6 +83,10 @@ export default function App() {
     () => signals.find((signal) => signal.id === selectedSignalId) ?? null,
     [signals, selectedSignalId],
   )
+  // K 线行 → 蜡烛数据（纯换算，见 chart/klines.js）
+  const candles = useMemo(() => buildCandles(klines), [klines])
+  // 信号一次多取一些供图上叠加；表格仍只展示最近 RECENT_LIMIT 条（与 Stage 17 一致）
+  const tableSignals = useMemo(() => signals.slice(-RECENT_LIMIT), [signals])
 
   // ------------------------------------------------------------------ 加载
   const checkHealth = useCallback(async () => {
@@ -117,7 +127,7 @@ export default function App() {
           strategyId: Number(form.strategyId),
           symbolId: form.symbolId ? Number(form.symbolId) : undefined,
           timeframe: form.timeframe || undefined,
-          limit: RECENT_LIMIT,
+          limit: CHART_SIGNAL_LIMIT,
         })
         setSignals(rows)
         setSignalsState((previous) => ({
@@ -132,6 +142,30 @@ export default function App() {
     },
     [form.strategyId, form.symbolId, form.timeframe],
   )
+
+  const loadKlines = useCallback(async () => {
+    if (!form.symbolId || !form.timeframe) {
+      setKlines([])
+      return
+    }
+    // 切换标的 / 周期 / 起止时间时先清空，避免残留旧 K 线与旧信号标记
+    setKlines([])
+    setKlinesState({ loading: true, error: null })
+    try {
+      const rows = await api.listKlines({
+        symbolId: Number(form.symbolId),
+        timeframe: form.timeframe,
+        startTimestamp: form.startTimestamp.trim() || undefined,
+        endTimestamp: form.endTimestamp.trim() || undefined,
+        limit: DEFAULT_KLINE_LIMIT,
+      })
+      setKlines(rows)
+      setKlinesState({ loading: false, error: null })
+    } catch (error) {
+      setKlines([])
+      setKlinesState({ loading: false, error: error.message })
+    }
+  }, [form.symbolId, form.timeframe, form.startTimestamp, form.endTimestamp])
 
   const loadRecords = useCallback(async () => {
     setRecordsState({ loading: true, error: null })
@@ -161,6 +195,11 @@ export default function App() {
   useEffect(() => {
     loadSignals()
   }, [loadSignals])
+
+  // 标的 / 周期 / 起止时间变化 → 重新加载 K 线
+  useEffect(() => {
+    loadKlines()
+  }, [loadKlines])
 
   // 信号自动刷新
   useEffect(() => {
@@ -262,6 +301,18 @@ export default function App() {
         onDismiss={() => setLoadError(null)}
       />
 
+      <KlineChartPanel
+        candles={candles}
+        signals={signals}
+        symbolsById={symbolsById}
+        symbolId={form.symbolId ? Number(form.symbolId) : null}
+        timeframe={form.timeframe}
+        loading={klinesState.loading}
+        error={klinesState.error}
+        onRefresh={loadKlines}
+        onSelectSignal={handleSelectSignal}
+      />
+
       <main className="layout">
         <div className="column column-left">
           <StrategyRunnerPanel
@@ -292,7 +343,7 @@ export default function App() {
 
         <div className="column column-middle">
           <SignalsPanel
-            signals={signals}
+            signals={tableSignals}
             symbolsById={symbolsById}
             loading={signalsState.loading}
             error={signalsState.error}

@@ -19,17 +19,18 @@ frontend/
 ├── index.html                 页面骨架
 ├── vite.config.js             Vite + React 插件 +（vitest 使用 node 环境）
 ├── .env.example               VITE_API_BASE_URL 示例
-├── package.json               依赖与脚本（dev / build / preview / test）
+├── package.json               依赖与脚本（dev / build / preview / test；图表依赖 lightweight-charts）
 ├── src/
 │   ├── main.jsx               挂载入口
 │   ├── App.jsx                状态编排：加载数据、调用 API、分发结果
 │   ├── config.js              唯一的 API 地址来源（VITE_API_BASE_URL）
 │   ├── format.js              纯展示用格式化（不做任何业务计算）
 │   ├── styles.css             简单样式
+│   ├── chart/klines.js         K 线↔信号纯计算（时间换算 / 蜡烛构建 / 按 timestamp 匹配标记）
 │   ├── api/client.js          唯一的 HTTP 出口（含错误翻译）
-│   └── components/            HealthBar / StrategyRunnerPanel / SignalsPanel /
+│   └── components/            HealthBar / StrategyRunnerPanel / KlineChartPanel / SignalsPanel /
 │                              ExecutionPanel / PositionsPanel / OrdersPanel / TradesPanel / ErrorBanner
-└── tests/                     api-client.test.js、components.test.jsx（最小化）
+└── tests/                     api-client.test.js、klines.test.js、components.test.jsx（最小化）
 ```
 
 ## 命令（在 frontend/ 目录下）

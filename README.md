@@ -412,6 +412,26 @@ $env:STRATEGY_ENGINE_DB_PATH = "C:\path\to\strategy_engine.db"
 - [x] 端到端人工验收（临时库，正式库只读）：无头 Chromium 中真实点击「运行策略」→ 20 条 pending 信号 →
   「模拟执行」→ Positions 1 条 / Orders 1 条 / Trades 1 条，全部 200 OK
 
+### Stage 18 — 第一版 K 线与信号可视化
+
+- [x] `frontend/src/components/KlineChartPanel.jsx`：K 线主图（`lightweight-charts@5.2.1`）
+  * 标准 OHLC 蜡烛图 + 十字光标 + 滚轮缩放 / 拖动平移 + `fitContent()` 自动适配数据范围
+  * 图例显示鼠标所在（无鼠标时为最后一根）K 线的时间与 O / H / L / C 及涨跌
+  * 复用现有 `GET /klines`（默认只取最近 320 根，不拉全量数据）
+- [x] `frontend/src/chart/klines.js`：信号叠加的纯计算
+  * **按 signal.timestamp 与 K 线 timestamp 精确匹配**（都换算成秒后比较），绝不按数组下标对应
+  * long → 绿色向上箭头（K 线下方）、short → 红色向下箭头（K 线上方）
+  * pending 实色、executed 浅色并带 ✓；匹配不上的信号单独计数并显示在界面上
+  * 悬停 / 点击图表即显示该 K 线上信号的 id / timestamp / direction / price / status / reason
+- [x] 数据刷新：切换标的 / 周期 / 起止时间时先清空旧 K 线与旧标记再加载新数据；
+  点击「运行策略」保持当前 K 线只刷新信号；「模拟执行」后标记状态同步更新
+- [x] `frontend/tests/klines.test.js`：14 个测试（时间换算、蜡烛构建、**按时间戳匹配而非下标**、
+  long/short 形状与位置、pending/executed 表现差异、分组与越界信号计数；固定样本取自真实接口响应）
+- [x] `frontend/tests/components.test.jsx`：新增 K 线面板渲染冒烟测试（图例 / 统计 / 空态 / 错误态）
+- [x] 依赖：仅新增 `lightweight-charts@5.2.1`（图表所必需）；未新增后端接口、未改数据库
+- [x] 无头 Chromium 真实渲染验收：600519 + 15m 共 320 根；图例 OHLC 与接口逐字段一致；319/319 信号匹配；
+  切 1d 后旧 K 线与旧标记不残留；运行策略 / 模拟执行链路正常；浏览器 console 无未捕获错误
+
 #### 当前已支持
 
 - `symbols` 标的
@@ -429,6 +449,8 @@ $env:STRATEGY_ENGINE_DB_PATH = "C:\path\to\strategy_engine.db"
 - **执行器 API 层**：FastAPI 接口供前端调用（本地模拟执行）
 - **第一版执行器前端**：React + Vite 页面，可在浏览器里选策略/标的/周期、运行策略、
   查看信号、对 pending 信号模拟执行、查看持仓/订单/成交（仅操作本地模拟执行器）
+- **K 线与信号可视化**：lightweight-charts 主图 + 信号叠加（按时间戳精确匹配，pending / executed 区分，
+  悬停 / 点击看信号详情），只消费现有 `/klines` 与 signals 接口
 
 #### 当前仍未实现
 
@@ -439,7 +461,7 @@ AI、MCP、实盘交易（**未连接任何真实交易所**）。
 
 ## 7. 后续阶段会逐步加入的内容（均尚未实现）
 
-- 前端增强：Stage 17 已交付第一版可操作界面；图表 / Dashboard / 时间范围可视化等按需再扩（本阶段刻意不做）
+- 前端增强：Stage 17/18 已交付可操作界面与 K 线图；收益曲线 / Dashboard / 移动端等按需再扩（刻意不做）
 - 自动化串联：定时跑策略 → 风控 → 模拟执行（当前各环节需手动调用）
 - 风控（Risk Manager）：独立于策略放行信号（当前模拟执行器不做风控判断）
 - 回测增强：手续费 / 滑点 / 资金管理 / 杠杆、浮盈与资金曲线、Sharpe / 最大回撤等风险指标、防过拟合验证（Train / Validation / Test / Walk-forward / Stress Test）
@@ -474,7 +496,7 @@ cd C:\Users\T14\Projects\strategy-engine
 # 交互式文档：http://127.0.0.1:8000/docs
 ```
 
-### 启动前端（Stage 17）
+### 启动前端（Stage 17 / Stage 18）
 
 前端在 `frontend/`（React + Vite），只做展示 / 输入 / 调用 API，**不含任何策略、订单、成交、持仓逻辑**。
 API 地址统一由 `VITE_API_BASE_URL` 提供（默认 `http://127.0.0.1:8000`），不在组件里写死。
@@ -497,6 +519,8 @@ npm run dev            # 开发服务器 http://127.0.0.1:5173
 - 前端只操作**本地模拟执行器**：页面上的「模拟执行」不会下单到任何真实交易所
 - 跨域：后端默认只允许 `http://127.0.0.1:5173` 与 `http://localhost:5173`，
   可用环境变量 `STRATEGY_ENGINE_CORS_ORIGINS`（逗号分隔）覆盖
+- K 线图使用 `lightweight-charts`（已在 `frontend/package.json` 依赖里，`npm install` 会一并装好）；
+  图表只消费现有 `GET /klines` 与 `GET /strategies/{id}/signals`，**未新增任何后端接口**
 - 前端最小测试：`npm run test`（vitest；组件用 `react-dom/server` 渲染，不引入 jsdom）
 - 备注：建立本阶段时本机**未安装 Node.js / npm**，因此 `npm install` 未在本机执行过；
   前端代码的正确性是靠在沙箱里手工还原依赖（react/react-dom/esbuild）+ 无头 Chromium
