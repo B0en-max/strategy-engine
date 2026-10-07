@@ -24,59 +24,53 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 
 ## 3. 当前开发阶段
 
-**Stage 13 — 策略运行器（Strategy Runner）**
+**Stage 14 — 基础回测引擎（Backtest Engine）**
 
-已建立 `strategies/`（策略接口 + 示例策略 + 运行器）：
+已建立 `backtest/engine.py`，把已有组件串成最小可用的历史回测：
 
 ```
-strategies.config ─┐
-                   ├─→ Strategy.generate() ─→ signals 表
-klines (symbol+tf) ─┘
+正式数据库（只读）                独立临时运行库（读写）
+klines / strategies / symbols ─► signals → orders → trades → positions ─► BacktestResult
 ```
 
-- `strategies/base.py`：`Bar` / `SignalCandidate` / `Strategy` 接口（**与数据库解耦**，策略可单独测试）
-- `strategies/close_direction.py`：**最简示例策略**——当前收盘价 > 前一根 → `long`，< → `short`，相等 → 不产生信号
-- `strategies/runner.py`：`StrategyRunner.run(strategy_id, symbol_id, timeframe)`
-  * 按 `strategy_id` 读策略配置，按 `symbol_id` + `timeframe` 读 K 线（**升序**参与计算）
-  * 策略实现由 `config["type"]` 选择（缺省 `close_direction`），**逻辑不写死在 Runner 里**
-  * 写信号：`strategy_id / symbol_id / timeframe / timestamp / direction / price / reason`
-  * 落库在**单个事务**里（`unit_of_work`），失败整批回滚
-  * 同一 `(strategy, symbol, timeframe, timestamp)` 已有信号会**跳过**（可重复运行，不产生重复信号）
-  * **不创建 Order / Trade / Position**（运行器里根本没有这三个 Repository）
+- `BacktestEngine(source_db_path=None, run_db_path=None).run(strategy_id, symbol_id, timeframe, *, start_timestamp, end_timestamp)`
+- **复用现有组件，不重写业务逻辑**：`StrategyRunner`（策略→信号）、`ExecutionEngine`（信号→订单/成交/持仓）、各 Repository（引擎内不写 SQL）
+- 回测规则（本阶段最简单实现）：`long → buy`、`short → sell`；成交价取**信号所在 K 线的收盘价**；
+  每次固定数量 **1**；成交时间取**信号所在 K 线的时间**（历史模拟，不使用当前时间）；
+  无手续费 / 滑点 / 资金管理 / 杠杆 / 保证金，无复杂绩效指标
+- 结果字段：`strategy_id` / `symbol_id` / `timeframe` / `start_timestamp` / `end_timestamp` /
+  `bars_processed` / `signals_generated` / `trades_executed` / `final_position_quantity` /
+  `final_position_avg_price`（另附 `run_db_path` 便于事后查看）
 
-策略参数只来自 `strategies.config`，例如：
+### 隔离保证（本阶段硬性要求）
 
-```json
-{"type": "close_direction", "min_move": 0.02}
-```
+| 要求 | 实现 |
+|---|---|
+| 回测不修改正式库 | 正式库**全程只读**：只从中复制本次回测需要的策略 / 标的 / K 线 |
+| 不把历史信号/订单/成交/持仓当回测结果 | 回测产生的全部数据只写在**独立临时运行库**里 |
+| 不依赖正式 `signals` 表 | 运行库每次都是新的，回测从零开始；正式库 `signals` 始终不动 |
+| 一次回测一个运行上下文 | 每个引擎实例一个运行库（默认系统临时目录，`close()` 后自动清理；
+也可传 `run_db_path` 保留下来查看） |
 
-`min_move` 为可选（默认 0 = 严格按涨/跌判断）；示例策略只用于验证链路，**不是最终交易策略**。
+### 本次人工验收（真实 600519 K 线，全程只操作临时库）
 
-```python
-from strategies import StrategyRunner
+把正式库里的真实 K 线复制到临时“来源库”后回测：
 
-result = StrategyRunner().run(strategy_id=1, symbol_id=1, timeframe="15m")
-# RunResult(bars=320, signals=319, long_signals=138, short_signals=181, skipped=0, ...)
-```
+| 周期 | bars_processed | signals_generated | trades_executed | 买 / 卖 | final_position_quantity | final_position_avg_price |
+|---|---|---|---|---|---|---|
+| 15m | 320 | 319 | 319 | 138 / 181 | -43.0 | 1247.50 |
+| 1d | 60 | 59 | 59 | 28 / 31 | -3.0 | 1247.32 |
 
-### 本次人工验收（真实数据，临时库）
-
-把正式库里的真实 600519 K 线复制到临时库后运行示例策略：
-
-| 周期 | 参与计算 K 线 | 写入信号 | long / short | 重复运行 |
-|---|---|---|---|---|
-| 15m | 320 | 319 | 138 / 181 | 新写入 0，跳过 319 |
-| 1d | 60 | 59 | 28 / 31 | 新写入 0，跳过 59 |
-
-信号按时间升序、字段完整（例：`close 1297.44 -> 1293.07`）；临时库中 order/trade/position 数量为 **0/0/0**；
-**未向正式库写入任何信号**（正式库 `signals` 仍为 0 行）。
+- 成交时间按 K 线时间升序（15m：`2026-09-02 09:45` ~ `2026-09-30 14:45`；1d：`2026-07-09` ~ `2026-09-30`）
+- 运行库中 `orders = trades = signals`（319 / 59），持仓与结果一致；退出 `with` 后临时运行库已自动清理
+- **正式库前后完全一致**：`symbols=1, klines=380, strategies=0, signals=0, orders=0, trades=0, positions=0`
 
 > **时间语义（全局约定）**：所有时间戳为 **UTC**，格式 `YYYY-MM-DD HH:MM:SS`；
-> `klines.timestamp` = K 线开始时间；`signals.timestamp` = 信号发生时间（示例策略取当前 K 线时间）；
-> `trades.timestamp` = 成交发生时间；`orders.created_at` = 订单创建时间。
+> `klines.timestamp` = K 线开始时间；`signals.timestamp` = 信号发生时间；
+> `trades.timestamp` = 成交发生时间（回测中 = 信号所在 K 线时间）；`orders.created_at` = 订单创建时间。
 
 （Stage 01 骨架；02 SQLite 基础；03 symbols；04 klines；05 strategies；06 signals；
-07 trades；08 positions；09 orders；10 模拟执行器；11 K 线采集层；12 真实数据源。）
+07 trades；08 positions；09 orders；10 模拟执行器；11 K 线采集层；12 真实数据源；13 策略运行器。）
 
 ## 4. 总体模块（规划）
 
@@ -89,7 +83,7 @@ result = StrategyRunner().run(strategy_id=1, symbol_id=1, timeframe="15m")
 | `data/cache/` | 可重建的缓存（不入库） | 仅目录 |
 | `data_source/` | 行情数据采集（数据源接口 + HTTP/JSON 实现 + 预设 + 导入 CLI） | 已实现：已接入**新浪财经**并完成真实历史导入 |
 | `strategies/` | 策略实现（版本化：v1 / v2 / v3 …） | 已有策略接口 + 示例策略 + **策略运行器**（产生信号） |
-| `backtest/` | 回测引擎（严格按时间顺序，禁止未来数据泄漏） | 空包，仅占位 |
+| `backtest/` | 回测引擎（严格按时间顺序，禁止未来数据泄漏） | 已有**基础回测引擎**（独立临时库运行；无手续费/滑点/杠杆） |
 | `execution/` | 执行层（只机械执行已批准的信号，不自己判断市场） | **模拟执行器已实现**（`execution/engine.py`），无实盘 |
 | `review/` | 交易记录与复盘 | 空包，仅占位 |
 | `optimization/` | 参数寻优、防过拟合验证（Train/Validation/Test/Walk-forward） | 空包，仅占位 |
@@ -339,6 +333,19 @@ result = StrategyRunner().run(strategy_id=1, symbol_id=1, timeframe="15m")
   信号字段、不产生交易对象、重复运行、写入失败回滚、纯策略计算、临时库隔离）
 - [x] 人工验收：真实 600519 K 线复制到临时库跑通（15m 319 条 / 1d 59 条信号，0/0/0 交易对象）
 
+### Stage 14 — 基础回测引擎（Backtest Engine）
+
+- [x] `backtest/engine.py`：`BacktestEngine.run()`（独立临时运行库 + 复制策略/标的/K 线，正式库全程只读）
+  * 链路：K 线 → `StrategyRunner`（信号）→ `ExecutionEngine`（订单/成交/持仓）→ `BacktestResult`
+  * 规则：long→buy、short→sell、成交价 = 信号所在 K 线收盘价、固定数量 1、成交时间 = K 线时间
+  * 只执行本次新产生且仍为 pending 的信号；同一引擎再次 run 不会重复成交
+  * 支持显式 `run_db_path`（保留便于查看）与默认临时库（`close()` 后自动清理）
+- [x] `backtest/__init__.py`：对外导出 `BacktestEngine` / `BacktestResult`
+- [x] `tests/test_backtest.py`：23 个测试（结果字段与计数、时间范围、时间顺序、
+  long→buy / short→sell、持仓数量与均价、信号只成交一次、来源库只读、
+  多次回测隔离、临时库清理、schema 版本、错误处理）
+- [x] 人工验收：真实 600519 K 线（15m 320 根 / 1d 60 根）在临时库里完成完整回测，正式库未被修改
+
 #### 当前已支持
 
 - `symbols` 标的
@@ -351,18 +358,20 @@ result = StrategyRunner().run(strategy_id=1, symbol_id=1, timeframe="15m")
 - `orders` 订单（market / limit、五种状态）
 - **模拟执行器**：Signal → Order → Trade → Position 全链路，单事务原子、失败整体回滚
 - **K 线采集层**：可配置 HTTP/JSON 数据源（已接入新浪财经）→ 写入 `klines`，重复采集不重复插入
+- **基础回测引擎**：K 线 → 信号 → 模拟成交 → 订单/成交/持仓 → 回测结果（独立临时库，正式库只读）
 
 #### 当前仍未实现
 
-实时行情推送与定时采集、自动交易（信号 → 自动下单）、风控（Risk Manager）、回测、
+实时行情推送与定时采集、自动交易（无人值守）、风控（Risk Manager）、
+回测增强（手续费 / 滑点 / 资金管理 / 杠杆 / 复杂绩效指标 / 防过拟合流程）、
 盈亏计算（PnL）、复盘、复杂指标与最终交易策略、AI、API、MCP、前端、实盘交易。
 
 ## 7. 后续阶段会逐步加入的内容（均尚未实现）
 
-- 阶段 14 起：实时行情 / 定时采集调度（当前只支持手动按需拉取历史 K 线）
+- 阶段 15 起：实时行情 / 定时采集调度（当前只支持手动按需拉取历史 K 线）
 - 自动化串联：定时跑策略 → 风控 → 模拟执行（当前各环节需手动调用）
 - 风控（Risk Manager）：独立于策略放行信号（当前模拟执行器不做风控判断）
-- 回测引擎与防过拟合验证（Train / Validation / Test / Walk-forward / Stress Test）
+- 回测增强：手续费 / 滑点 / 资金管理 / 杠杆、复杂绩效指标与防过拟合验证（Train / Validation / Test / Walk-forward / Stress Test）
 - 盈亏计算（PnL）与交易复盘
 - 参数优化
 - AI 分析模块（DeepSeek）：只产出 Candidate 策略，不得修改 ACTIVE 策略
