@@ -51,6 +51,13 @@ def require_positive_int(value: object, field: str) -> int:
     return value
 
 
+def optional_positive_int(value: object, field: str) -> int | None:
+    """可选正整数：None 或正整数（用于可为空的外键，例如 trades.signal_id）。"""
+    if value is None:
+        return None
+    return require_positive_int(value, field)
+
+
 def require_int_at_least(value: object, field: str, minimum: int) -> int:
     """必填整数且不小于 minimum。"""
     if isinstance(value, bool) or not isinstance(value, int):

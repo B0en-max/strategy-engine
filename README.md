@@ -24,30 +24,30 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 
 ## 3. 当前开发阶段
 
-**Stage 06 — 交易信号（Signal）数据层**
+**Stage 07 — 交易记录（Trade）数据层**
 
-已建立信号表 `signals` 与 `SignalRepository`：
+已建立成交记录表 `trades` 与 `TradeRepository`：
 
-- **引用完整性**：`strategy_id → strategies(id)`、`symbol_id → symbols(id)` 均为真实外键，
-  由数据库强制（不复制一套 Python 外键检查）
-- **direction**：`long` / `short`；**status**：`pending` / `executed` / `cancelled`（默认 `pending`）
-- **索引**：本表没有唯一约束，因此根据查询需求显式建立复合索引
-  `(strategy_id, symbol_id, timeframe, timestamp)`，并用 `EXPLAIN QUERY PLAN` 实测生效
-- 本阶段只建立**信号数据层**，**尚无信号生成逻辑**，也未接入任何真实行情数据源
+- **定位**：Trade 是**已经发生的实际成交**记录，不是委托/订单，也不是持仓
+- **数据关系**：`strategies → signals → trades`；`signal_id` 允许为空（手工交易可不带 Signal）
+- **引用完整性**：`signal_id → signals(id)`、`symbol_id → symbols(id)` 均为真实外键，由数据库强制
+- **side**：`buy` / `sell`（数据库 CHECK + Python 校验）
+- **fee**：默认 0（可为负，用于返佣场景）
+- 本阶段**不做**订单系统、持仓系统、盈亏计算、回测、实盘交易
 
 > **时间语义（全局约定）**：所有时间戳为 **UTC**，格式 `YYYY-MM-DD HH:MM:SS`；
-> `klines.timestamp` 表示该根 K 线的**开始时间**（不是结束时间）；
-> `signals.timestamp` 表示**信号发生时间**；`created_at` 表示记录**进入数据库**的时间。
+> `klines.timestamp` = K 线开始时间；`signals.timestamp` = 信号发生时间；
+> `trades.timestamp` = 成交发生时间；`created_at` = 记录进入数据库的时间。
 
 （Stage 01 骨架；Stage 02 SQLite 连接/事务/最小数据访问层；Stage 03 symbols；
-Stage 04 klines；Stage 05 strategies。）
+Stage 04 klines；Stage 05 strategies；Stage 06 signals。）
 
 ## 4. 总体模块（规划）
 
 | 目录 | 职责 | 当前状态 |
 |---|---|---|
 | `config/` | 配置集中管理（路径、参数、运行模式） | 空包，仅占位 |
-| `database/` | SQLite 长期数据基础（连接、事务、各业务表访问层） | 基础设施 + `symbols` + `klines` + `strategies` + `signals` |
+| `database/` | SQLite 长期数据基础（连接、事务、各业务表访问层） | 基础设施 + `symbols` + `klines` + `strategies` + `signals` + `trades` |
 | `data/raw/` | 原始行情数据落地 | 仅目录，未实现采集 |
 | `data/processed/` | 清洗/加工后的中间数据 | 仅目录，未实现处理 |
 | `data/cache/` | 可重建的缓存（不入库） | 仅目录 |
@@ -64,7 +64,89 @@ Stage 04 klines；Stage 05 strategies。）
 > 风控（Risk Manager）在架构上是独立模块，Strategy 不得绕过它；
 > 它会在后续阶段以独立目录/模块的形式加入，**当前尚未实现**。
 
-## 5. 各阶段已完成的内容
+## 5. 数据库结构
+
+数据库文件：`data/strategy_engine.db`（运行产物，被 `.gitignore` 忽略，**不入 Git**）。
+当前 `PRAGMA user_version = 5`。所有时间戳均为 **UTC**，格式 `YYYY-MM-DD HH:MM:SS`。
+
+### `symbols` — 交易标的（Stage 03）
+
+| 字段 | 类型 | 约束 |
+|---|---|---|
+| `id` | INTEGER | PRIMARY KEY AUTOINCREMENT |
+| `symbol` | TEXT | NOT NULL |
+| `name` | TEXT | NOT NULL |
+| `market` | TEXT | NOT NULL |
+| `asset_type` | TEXT | NOT NULL |
+| `is_active` | INTEGER | NOT NULL，DEFAULT 1，CHECK IN (0,1) |
+| `created_at` / `updated_at` | TEXT | NOT NULL |
+
+- `UNIQUE(market, symbol)`：不同市场允许存在同代码标的；停用用逻辑停用（`is_active = 0`），无物理删除
+
+### `klines` — K 线 OHLCV（Stage 04）
+
+| 字段 | 类型 | 约束 |
+|---|---|---|
+| `id` | INTEGER | PRIMARY KEY AUTOINCREMENT |
+| `symbol_id` | INTEGER | NOT NULL，FOREIGN KEY → `symbols(id)` |
+| `timeframe` | TEXT | NOT NULL（不限定取值） |
+| `timestamp` | TEXT | NOT NULL，K 线**开始时间**（UTC） |
+| `open` / `high` / `low` / `close` / `volume` | REAL | NOT NULL |
+| `amount` | REAL | 可空（部分数据源无成交额） |
+| `created_at` | TEXT | NOT NULL |
+
+- `UNIQUE(symbol_id, timeframe, timestamp)`；`CHECK` 保证 `high >= open/close/low` 且 `low <= open/close/high`
+- 故意不限制 `price > 0` / `volume > 0`；唯一约束已生成隐式索引（列顺序即查询路径），不重复建索引
+
+### `strategies` — 策略定义与版本（Stage 05）
+
+| 字段 | 类型 | 约束 |
+|---|---|---|
+| `id` | INTEGER | PRIMARY KEY AUTOINCREMENT |
+| `name` | TEXT | NOT NULL |
+| `description` | TEXT | 可空 |
+| `status` | TEXT | NOT NULL，DEFAULT `'draft'`，CHECK IN (draft/testing/active/retired) |
+| `version` | INTEGER | NOT NULL，DEFAULT 1，CHECK ≥ 1 |
+| `config` | TEXT | NOT NULL（JSON 字符串，**不依赖** SQLite JSON1） |
+| `created_at` / `updated_at` | TEXT | NOT NULL |
+
+- `UNIQUE(name, version)`：**每个策略版本都是独立记录**，不靠修改原记录模拟版本
+
+### `signals` — 策略产生的信号（Stage 06）
+
+| 字段 | 类型 | 约束 |
+|---|---|---|
+| `id` | INTEGER | PRIMARY KEY AUTOINCREMENT |
+| `strategy_id` | INTEGER | NOT NULL，FOREIGN KEY → `strategies(id)` |
+| `symbol_id` | INTEGER | NOT NULL，FOREIGN KEY → `symbols(id)` |
+| `timeframe` | TEXT | NOT NULL |
+| `timestamp` | TEXT | NOT NULL，信号发生时间（UTC） |
+| `direction` | TEXT | NOT NULL，CHECK IN (long/short) |
+| `price` | REAL | NOT NULL |
+| `reason` | TEXT | 可空 |
+| `status` | TEXT | NOT NULL，DEFAULT `'pending'`，CHECK IN (pending/executed/cancelled) |
+| `created_at` | TEXT | NOT NULL |
+
+- 索引：`idx_signals_strategy_symbol_timeframe_timestamp (strategy_id, symbol_id, timeframe, timestamp)`
+
+### `trades` — 实际成交记录（Stage 07）
+
+| 字段 | 类型 | 约束 |
+|---|---|---|
+| `id` | INTEGER | PRIMARY KEY AUTOINCREMENT |
+| `signal_id` | INTEGER | **可空**，FOREIGN KEY → `signals(id)`（手工交易可无 Signal） |
+| `symbol_id` | INTEGER | NOT NULL，FOREIGN KEY → `symbols(id)` |
+| `side` | TEXT | NOT NULL，CHECK IN (buy/sell) |
+| `quantity` | REAL | NOT NULL |
+| `price` | REAL | NOT NULL |
+| `timestamp` | TEXT | NOT NULL，成交发生时间（UTC） |
+| `fee` | REAL | NOT NULL，DEFAULT 0（可为负，用于返佣） |
+| `created_at` | TEXT | NOT NULL |
+
+- 索引：`idx_trades_symbol_timestamp (symbol_id, timestamp)`
+- 数据关系：`strategies → signals → trades`；本表**只记录成交**，不含订单、持仓、盈亏
+
+## 6. 各阶段已完成的内容
 
 ### Stage 01 — 项目骨架
 
@@ -116,6 +198,14 @@ Stage 04 klines；Stage 05 strategies。）
 - [x] `database/__init__.py`：对外导出 `SignalRepository`
 - [x] `tests/test_signals.py`：41 个测试（Schema、外键、direction、status、创建与查询、list 过滤、status 更新、count、持久化）
 
+### Stage 07 — 交易记录（Trade）数据层
+
+- [x] `database/models.py`：新增 `trades` 表（schema 版本 → 5）；两个真实外键 + `CHECK(side)` + `fee` 默认 0
+- [x] `database/trade_repository.py`：`TradeRepository`（create / get / list / count）
+- [x] `database/validation.py`：新增 `optional_positive_int`（可为空的外键字段校验）
+- [x] `database/__init__.py`：对外导出 `TradeRepository`
+- [x] `tests/test_trades.py`：23 个测试（建表、外键、buy/sell、创建与查询、基本筛选、计数、持久化）
+
 #### 当前已支持
 
 - `symbols` 标的
@@ -125,13 +215,14 @@ Stage 04 klines；Stage 05 strategies。）
 - **strategy config**（JSON 文本）
 - **strategy status**（draft / testing / active / retired）
 - `signals` 交易信号（含策略 / 标的引用、long / short、pending / executed / cancelled）
+- `trades` 实际成交记录（buy / sell、可关联 Signal 或手工交易）
 
 #### 当前仍未实现
 
-执行、复盘、策略修改、回测、真实行情数据源、实盘交易、AI、API、MCP
-（也尚无信号生成逻辑：本阶段只建立了信号**数据层**）。
+订单系统、持仓系统、盈亏计算（PnL）、执行层、复盘、策略修改、回测、真实行情数据源、实盘交易、AI、API、MCP
+（也尚无信号生成逻辑：Stage 05 / 06 / 07 建立的都是**数据层**）。
 
-## 6. 后续阶段会逐步加入的内容（均尚未实现）
+## 7. 后续阶段会逐步加入的内容（均尚未实现）
 
 - 阶段 07 起：真实行情数据接入（数据采集 / 数据清洗 / 原始数据入库）—— 当前未接入任何外部行情源
 - 策略逻辑实现与信号生成（Stage 05 / 06 只建立了策略定义与信号数据层，尚无生成逻辑）
@@ -144,7 +235,7 @@ Stage 04 klines；Stage 05 strategies。）
 - FastAPI / MCP 对外接口
 - （更远期）真实交易 —— 目前明确禁止
 
-## 7. 开发与运行方式
+## 8. 开发与运行方式
 
 环境：Windows + Python 3.13 + 项目内虚拟环境 `.venv`
 
@@ -165,7 +256,7 @@ cd C:\Users\T14\Projects\strategy-engine
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-## 8. 架构原则（长期遵守）
+## 9. 架构原则（长期遵守）
 
 1. **模块化**：数据、策略、回测、风控、执行、复盘、优化、API 尽可能解耦，可单独替换。
 2. **策略版本化**：策略不覆盖旧版本，每一版都可追溯（参数、创建时间、测试数据、回测与复盘结果、是否批准）。
@@ -176,7 +267,7 @@ cd C:\Users\T14\Projects\strategy-engine
 7. **防止过拟合**：必须经过 Train / Validation / Test / Walk-forward / Stress Test / Paper Trading。
 8. **可追溯**：任意一笔交易都能追溯到具体的策略版本。
 
-## 9. 安全边界（禁止事项）
+## 10. 安全边界（禁止事项）
 
 - 不自动真实下单、不自动修改真实账户、不自动转账、不使用真实资金
 - 不绕过 Risk Manager，不让 AI 直接修改 ACTIVE 策略

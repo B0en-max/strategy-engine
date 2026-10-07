@@ -199,7 +199,6 @@ class SignalSchemaTest(SignalTestCase):
 
     def test_06_schema_version(self) -> None:
         self.assertEqual(self.signals.query_one("PRAGMA user_version")[0], SCHEMA_VERSION)
-        self.assertEqual(SCHEMA_VERSION, 4)
 
 
 class SignalForeignKeyTest(SignalTestCase):

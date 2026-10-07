@@ -5,10 +5,10 @@
     klines      —— K 线（OHLCV）数据（Stage 04）
     strategies  —— 策略定义与策略版本（Stage 05）
     signals     —— 策略产生的交易信号（Stage 06）
+    trades      —— 实际发生的成交记录（Stage 07）
 
 尚未创建的后续业务表：
-    orders / trades / positions / backtests / performance /
-    reviews / optimization_candidates
+    orders / positions / backtests / performance / reviews / optimization_candidates
     —— 属于后续阶段，本阶段一律不建。
 
 schema 版本存放在 SQLite 原生 PRAGMA user_version 中，便于将来做迁移。
@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from typing import Final
 
 # 当前 schema 版本。后续阶段新增/修改表结构时应递增，并补上迁移逻辑。
-SCHEMA_VERSION: Final[int] = 4
+SCHEMA_VERSION: Final[int] = 5
 
 # 时间统一格式（SQLite 稳定支持，不引入第三方时间库）
 TIMESTAMP_FORMAT: Final[str] = "%Y-%m-%d %H:%M:%S"
@@ -38,6 +38,7 @@ SYMBOLS_TABLE: Final[str] = "symbols"
 KLINES_TABLE: Final[str] = "klines"
 STRATEGIES_TABLE: Final[str] = "strategies"
 SIGNALS_TABLE: Final[str] = "signals"
+TRADES_TABLE: Final[str] = "trades"
 
 # 数据库初始化后应当存在的业务表（后续阶段新增表时在这里登记）
 BUSINESS_TABLES: Final[tuple[str, ...]] = (
@@ -45,6 +46,7 @@ BUSINESS_TABLES: Final[tuple[str, ...]] = (
     KLINES_TABLE,
     STRATEGIES_TABLE,
     SIGNALS_TABLE,
+    TRADES_TABLE,
 )
 
 # ---------------------------------------------------------------------------
@@ -204,6 +206,54 @@ CREATE INDEX IF NOT EXISTS idx_signals_strategy_symbol_timeframe_timestamp
 """
 
 
+# ---------------------------------------------------------------------------
+# trades：**实际发生的成交记录**
+#
+# 数据关系：strategies → signals → trades
+#
+# 设计要点：
+#   1. signal_id 允许为空：手工交易可能没有对应的 Signal；
+#      非空时通过外键引用 signals(id)。
+#   2. symbol_id 必填，真实外键引用 symbols(id)。
+#   3. side 只能是 buy / sell（数据库 CHECK；取值来源为 TRADE_SIDES）。
+#   4. quantity / price / fee 用 REAL：不同市场的手数与币种精度不同；
+#      fee 默认 0。
+#   5. 故意**不**加 quantity > 0 / price > 0 / fee >= 0 这类限制：
+#      续费返佣（fee 为负）与市场特殊性都存在，是否合理属于业务层判断，
+#      沿用项目在 klines 上的一贯约定（不在数据库层强行限制正值）。
+#   6. timestamp 表示成交发生时间（UTC，格式与其他表一致）。
+#   7. 不加入本阶段用不到的字段（无 updated_at / 无盈亏字段）。
+# ---------------------------------------------------------------------------
+TRADE_SIDES: Final[tuple[str, ...]] = ("buy", "sell")
+
+_TRADE_SIDE_SQL_LIST: Final[str] = ", ".join(f"'{s}'" for s in TRADE_SIDES)
+
+CREATE_TRADES_TABLE_SQL: Final[str] = f"""
+CREATE TABLE IF NOT EXISTS {TRADES_TABLE} (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id  INTEGER REFERENCES {SIGNALS_TABLE}(id),
+    symbol_id  INTEGER NOT NULL REFERENCES {SYMBOLS_TABLE}(id),
+    side       TEXT    NOT NULL,
+    quantity   REAL    NOT NULL,
+    price      REAL    NOT NULL,
+    timestamp  TEXT    NOT NULL,
+    fee        REAL    NOT NULL DEFAULT 0,
+    created_at TEXT    NOT NULL DEFAULT (strftime('{TIMESTAMP_FORMAT}', 'now')),
+    CONSTRAINT ck_trades_side CHECK (side IN ({_TRADE_SIDE_SQL_LIST}))
+)
+"""
+
+# 索引说明：trades 表没有唯一约束（也就没有隐式索引）。成交记录最常见的查询是
+# 「某标的的成交记录 + 按时间排序」，因此显式建立复合索引。
+# SQLite 索引条目尾部隐含 rowid，因此它天然满足 ORDER BY timestamp, id。
+# 注意：按 signal_id 筛选目前没有专门索引（SQLite 不会为外键列自动建索引），
+# 后续如有需要再根据实际查询添加。
+CREATE_TRADES_INDEX_SQL: Final[str] = f"""
+CREATE INDEX IF NOT EXISTS idx_trades_symbol_timestamp
+    ON {TRADES_TABLE} (symbol_id, timestamp)
+"""
+
+
 def utc_now_str() -> str:
     """返回当前 UTC 时间字符串（统一格式 TIMESTAMP_FORMAT）。"""
     return datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT)
@@ -222,5 +272,7 @@ def initialization_statements() -> list[tuple[str, tuple[object, ...]]]:
         (CREATE_STRATEGIES_TABLE_SQL, ()),
         (CREATE_SIGNALS_TABLE_SQL, ()),
         (CREATE_SIGNALS_INDEX_SQL, ()),
+        (CREATE_TRADES_TABLE_SQL, ()),
+        (CREATE_TRADES_INDEX_SQL, ()),
         (f"PRAGMA user_version = {SCHEMA_VERSION:d}", ()),
     ]
