@@ -24,53 +24,50 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 
 ## 3. 当前开发阶段
 
-**Stage 14 — 基础回测引擎（Backtest Engine）**
+**Stage 15 — 基础回测绩效统计（Backtest Metrics）**
 
-已建立 `backtest/engine.py`，把已有组件串成最小可用的历史回测：
+已建立 `backtest/metrics.py`：只做「回测结果 → 绩效指标」，**不改变 Stage 14 的回测执行逻辑**，
+也不重复实现策略计算 / 信号生成 / 模拟成交。
 
-```
-正式数据库（只读）                独立临时运行库（读写）
-klines / strategies / symbols ─► signals → orders → trades → positions ─► BacktestResult
-```
+- `compute_metrics(trades)`：从成交序列算指标（纯函数，不访问数据库）
+- `realized_trades(trades)`：逐笔审计——识别 **开多 / 加多 / 平多 / 减多 / 开空 / 加空 / 平空 / 减空 / 反转**，
+  并给出每笔结算的已实现盈亏
+- `run_backtest_with_metrics(engine, strategy_id, symbol_id, timeframe, ...)`：跑一次回测并给出 `(BacktestResult, BacktestMetrics)`
 
-- `BacktestEngine(source_db_path=None, run_db_path=None).run(strategy_id, symbol_id, timeframe, *, start_timestamp, end_timestamp)`
-- **复用现有组件，不重写业务逻辑**：`StrategyRunner`（策略→信号）、`ExecutionEngine`（信号→订单/成交/持仓）、各 Repository（引擎内不写 SQL）
-- 回测规则（本阶段最简单实现）：`long → buy`、`short → sell`；成交价取**信号所在 K 线的收盘价**；
-  每次固定数量 **1**；成交时间取**信号所在 K 线的时间**（历史模拟，不使用当前时间）；
-  无手续费 / 滑点 / 资金管理 / 杠杆 / 保证金，无复杂绩效指标
-- 结果字段：`strategy_id` / `symbol_id` / `timeframe` / `start_timestamp` / `end_timestamp` /
-  `bars_processed` / `signals_generated` / `trades_executed` / `final_position_quantity` /
-  `final_position_avg_price`（另附 `run_db_path` 便于事后查看）
+指标（`BacktestMetrics`）：`total_trades` / `buy_trades` / `sell_trades` / `winning_trades` /
+`losing_trades` / `total_pnl` / `win_rate` / `average_profit` / `average_loss` / `profit_factor`。
 
-### 隔离保证（本阶段硬性要求）
+**盈亏口径（保持最小化）**：只算**已实现**盈亏（未平仓浮盈不计）；不计手续费 / 滑点 / 资金 / 杠杆 / 保证金；
+多头 = 卖出平仓价 − 买入成本价，空头 = 卖出开仓价 − 买入平仓价；成本用**持仓平均成本**，部分平仓只结算对应部分。
 
-| 要求 | 实现 |
+口径细节（避免误读）：
+
+| 指标 | 口径 |
 |---|---|
-| 回测不修改正式库 | 正式库**全程只读**：只从中复制本次回测需要的策略 / 标的 / K 线 |
-| 不把历史信号/订单/成交/持仓当回测结果 | 回测产生的全部数据只写在**独立临时运行库**里 |
-| 不依赖正式 `signals` 表 | 运行库每次都是新的，回测从零开始；正式库 `signals` 始终不动 |
-| 一次回测一个运行上下文 | 每个引擎实例一个运行库（默认系统临时目录，`close()` 后自动清理；
-也可传 `run_db_path` 保留下来查看） |
+| `winning_trades` / `losing_trades` | 只统计**平仓成交**（含反转中先平掉的那部分）；只开仓/加仓的成交不计入；盈亏恰为 0 的平仓也不计入 |
+| `win_rate` | `winning_trades / (winning_trades + losing_trades)`，无平仓成交时为 0 |
+| `average_profit` | 盈利成交的均值；无盈利时为 0 |
+| `average_loss` | 亏损成交的均值（**负值**）；无亏损时为 0 |
+| `profit_factor` | `总盈利 / |总亏损|`；有盈利且无亏损时为 `inf`；无盈利时为 0 |
+| `total_pnl` | 所有平仓成交已实现盈亏之和（不含未平仓浮盈） |
 
 ### 本次人工验收（真实 600519 K 线，全程只操作临时库）
 
-把正式库里的真实 K 线复制到临时“来源库”后回测：
+| 周期 | total_trades | 买 / 卖 | 盈利 / 亏损 | total_pnl | win_rate | average_profit | average_loss | profit_factor |
+|---|---|---|---|---|---|---|---|---|
+| 15m | 319 | 138 / 181 | 112 / 26 | 809.18 | 81.16% | 8.18 | -4.12 | 8.55 |
+| 1d | 59 | 28 / 31 | 13 / 15 | 12.79 | 46.43% | 20.53 | -16.94 | 1.05 |
 
-| 周期 | bars_processed | signals_generated | trades_executed | 买 / 卖 | final_position_quantity | final_position_avg_price |
-|---|---|---|---|---|---|---|
-| 15m | 320 | 319 | 319 | 138 / 181 | -43.0 | 1247.50 |
-| 1d | 60 | 59 | 59 | 28 / 31 | -3.0 | 1247.32 |
-
-- 成交时间按 K 线时间升序（15m：`2026-09-02 09:45` ~ `2026-09-30 14:45`；1d：`2026-07-09` ~ `2026-09-30`）
-- 运行库中 `orders = trades = signals`（319 / 59），持仓与结果一致；退出 `with` 后临时运行库已自动清理
-- **正式库前后完全一致**：`symbols=1, klines=380, strategies=0, signals=0, orders=0, trades=0, positions=0`
+（15m 的 319 笔成交中只有 138 笔带平仓、其余 181 笔为开仓/加仓，符合“只有平仓才结算盈亏”的口径；
+末仓 -43 / -3 未平仓，其浮盈未计入 `total_pnl`。正式库前后完全一致，未被修改。）
 
 > **时间语义（全局约定）**：所有时间戳为 **UTC**，格式 `YYYY-MM-DD HH:MM:SS`；
 > `klines.timestamp` = K 线开始时间；`signals.timestamp` = 信号发生时间；
 > `trades.timestamp` = 成交发生时间（回测中 = 信号所在 K 线时间）；`orders.created_at` = 订单创建时间。
 
 （Stage 01 骨架；02 SQLite 基础；03 symbols；04 klines；05 strategies；06 signals；
-07 trades；08 positions；09 orders；10 模拟执行器；11 K 线采集层；12 真实数据源；13 策略运行器。）
+07 trades；08 positions；09 orders；10 模拟执行器；11 K 线采集层；12 真实数据源；
+13 策略运行器；14 基础回测引擎。）
 
 ## 4. 总体模块（规划）
 
@@ -83,7 +80,7 @@ klines / strategies / symbols ─► signals → orders → trades → positions
 | `data/cache/` | 可重建的缓存（不入库） | 仅目录 |
 | `data_source/` | 行情数据采集（数据源接口 + HTTP/JSON 实现 + 预设 + 导入 CLI） | 已实现：已接入**新浪财经**并完成真实历史导入 |
 | `strategies/` | 策略实现（版本化：v1 / v2 / v3 …） | 已有策略接口 + 示例策略 + **策略运行器**（产生信号） |
-| `backtest/` | 回测引擎（严格按时间顺序，禁止未来数据泄漏） | 已有**基础回测引擎**（独立临时库运行；无手续费/滑点/杠杆） |
+| `backtest/` | 回测引擎（严格按时间顺序，禁止未来数据泄漏） | 基础回测引擎 + 基础绩效统计（无手续费/滑点/杠杆） |
 | `execution/` | 执行层（只机械执行已批准的信号，不自己判断市场） | **模拟执行器已实现**（`execution/engine.py`），无实盘 |
 | `review/` | 交易记录与复盘 | 空包，仅占位 |
 | `optimization/` | 参数寻优、防过拟合验证（Train/Validation/Test/Walk-forward） | 空包，仅占位 |
@@ -346,6 +343,21 @@ klines / strategies / symbols ─► signals → orders → trades → positions
   多次回测隔离、临时库清理、schema 版本、错误处理）
 - [x] 人工验收：真实 600519 K 线（15m 320 根 / 1d 60 根）在临时库里完成完整回测，正式库未被修改
 
+### Stage 15 — 基础回测绩效统计（Backtest Metrics）
+
+- [x] `backtest/metrics.py`：`compute_metrics()`（纯函数）+ `realized_trades()`（逐笔事件审计）
+- [x] `backtest/metrics.py`：`run_backtest_with_metrics()`（复用 `BacktestEngine`，返回 `(BacktestResult, BacktestMetrics)`）
+- [x] 指标：`total_trades` / `buy_trades` / `sell_trades` / `winning_trades` / `losing_trades` /
+  `total_pnl` / `win_rate` / `average_profit` / `average_loss` / `profit_factor`
+- [x] 盈亏识别：基于带符号持仓状态机识别 开多/加多/平多/减多/开空/加空/平空/减空/反转，
+  按**持仓平均成本**只结算被平掉的部分；未平仓浮盈不计入
+- [x] `backtest/__init__.py`：导出绩效接口
+- [x] `tests/test_backtest_metrics.py`：22 个测试（人工构造成交序列做精确断言：全部盈利 / 全部亏损 /
+  混合 / 无成交 / 只有开仓未平仓 / 多头平仓 / 空头平仓 / 部分平仓 / 多翻空 / 空翻多 /
+  平均成本口径（非 FIFO）/ 事件类型识别 / 胜率与 profit_factor / 零盈亏平仓 / 非法输入；
+  另有引擎集成 6 例与正式库只读校验）
+- [x] 人工验收：真实 600519 K 线上的回测绩效（见第 3 节），正式库未被修改
+
 #### 当前已支持
 
 - `symbols` 标的
@@ -359,20 +371,22 @@ klines / strategies / symbols ─► signals → orders → trades → positions
 - **模拟执行器**：Signal → Order → Trade → Position 全链路，单事务原子、失败整体回滚
 - **K 线采集层**：可配置 HTTP/JSON 数据源（已接入新浪财经）→ 写入 `klines`，重复采集不重复插入
 - **基础回测引擎**：K 线 → 信号 → 模拟成交 → 订单/成交/持仓 → 回测结果（独立临时库，正式库只读）
+- **基础绩效统计**：已实现盈亏、盈亏笔数、胜率、平均盈亏、profit factor（逐笔可审计）
 
 #### 当前仍未实现
 
 实时行情推送与定时采集、自动交易（无人值守）、风控（Risk Manager）、
-回测增强（手续费 / 滑点 / 资金管理 / 杠杆 / 复杂绩效指标 / 防过拟合流程）、
-盈亏计算（PnL）、复盘、复杂指标与最终交易策略、AI、API、MCP、前端、实盘交易。
+回测增强（手续费 / 滑点 / 资金管理 / 杠杆 / 防过拟合流程）、
+浮盈与资金曲线、Sharpe / 最大回撤等复杂风险指标、交易复盘、复杂指标与最终交易策略、
+AI、API、MCP、前端、实盘交易。
 
 ## 7. 后续阶段会逐步加入的内容（均尚未实现）
 
-- 阶段 15 起：实时行情 / 定时采集调度（当前只支持手动按需拉取历史 K 线）
+- 阶段 16 起：实时行情 / 定时采集调度（当前只支持手动按需拉取历史 K 线）
 - 自动化串联：定时跑策略 → 风控 → 模拟执行（当前各环节需手动调用）
 - 风控（Risk Manager）：独立于策略放行信号（当前模拟执行器不做风控判断）
-- 回测增强：手续费 / 滑点 / 资金管理 / 杠杆、复杂绩效指标与防过拟合验证（Train / Validation / Test / Walk-forward / Stress Test）
-- 盈亏计算（PnL）与交易复盘
+- 回测增强：手续费 / 滑点 / 资金管理 / 杠杆、浮盈与资金曲线、Sharpe / 最大回撤等风险指标、防过拟合验证（Train / Validation / Test / Walk-forward / Stress Test）
+- 盈亏计算：已实现盈亏已在 Stage 15 实现；浮盈、资金曲线与复杂风险指标尚未实现
 - 参数优化
 - AI 分析模块（DeepSeek）：只产出 Candidate 策略，不得修改 ACTIVE 策略
 - FastAPI / MCP 对外接口
