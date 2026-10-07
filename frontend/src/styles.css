@@ -1,0 +1,336 @@
+/* Stage 17 第一版执行器前端样式：只为「看得清、点得动」，不做视觉设计 */
+
+:root {
+  color-scheme: light;
+  --border: #d8dde4;
+  --muted: #6b7280;
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --accent: #1f6feb;
+  --long: #1a7f37;
+  --short: #b42318;
+  --error-bg: #fdecea;
+  --error-border: #f5b5ae;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: #1f2328;
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 13px;
+}
+
+.app {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.app-header h1 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+
+.hint {
+  margin: 4px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.error-text {
+  margin: 6px 0 0;
+  color: var(--short);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+/* ---------------------------------------------------------------- 状态条 */
+.health {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.health-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.health-ok .health-dot {
+  background: var(--long);
+}
+
+.health-error .health-dot {
+  background: var(--short);
+}
+
+.health-label {
+  font-weight: 600;
+}
+
+.health-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.health-error {
+  color: var(--short);
+}
+
+.banner {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--error-border);
+  background: var(--error-bg);
+  border-radius: 6px;
+}
+
+.banner-body {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.banner-close {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+
+/* ---------------------------------------------------------------- 布局 */
+.layout {
+  display: grid;
+  grid-template-columns: 280px minmax(420px, 1fr) 260px;
+  gap: 12px;
+  align-items: start;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.records {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 1100px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.panel h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ---------------------------------------------------------------- 表单 */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.field > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+select,
+input[type='text'],
+input[type='number'] {
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: inherit;
+  background: #fff;
+}
+
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+button {
+  font: inherit;
+}
+
+button.primary {
+  padding: 6px 12px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+button.primary.small {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+button.primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.link-button {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+  font-size: 12px;
+}
+
+.link-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---------------------------------------------------------------- 表格 */
+.table-wrap {
+  overflow: auto;
+  max-height: 420px;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--border);
+  padding: 5px 6px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+th {
+  background: #fafbfc;
+  position: sticky;
+  top: 0;
+  font-weight: 600;
+}
+
+tbody tr:hover {
+  background: #f7f9fc;
+}
+
+tr.row-selected {
+  background: #eaf2ff;
+}
+
+td.empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 16px;
+  white-space: normal;
+}
+
+td.num,
+td.mono {
+  font-variant-numeric: tabular-nums;
+}
+
+td.mono {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+}
+
+td.reason {
+  white-space: normal;
+  min-width: 160px;
+  color: var(--muted);
+}
+
+.long {
+  color: var(--long);
+}
+
+.short {
+  color: var(--short);
+}
+
+/* ---------------------------------------------------------------- 结果 */
+.kv,
+.result {
+  margin: 6px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.kv li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.kv span {
+  color: var(--muted);
+}
+
+.result {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  margin-top: 8px;
+}
+
+.result dt {
+  color: var(--muted);
+}
+
+.result dd {
+  margin: 0;
+}

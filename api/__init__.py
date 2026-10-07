@@ -13,7 +13,7 @@
 本层不实现策略、订单、成交、持仓逻辑，一律复用已有组件。
 """
 
-from .app import API_VERSION, create_app, resolve_api_database_path
+from .app import API_VERSION, create_app, resolve_api_database_path, resolve_cors_origins
 from .schemas import ExecuteSignalRequest, RunStrategyRequest
 
 __all__ = [
@@ -22,4 +22,5 @@ __all__ = [
     "RunStrategyRequest",
     "create_app",
     "resolve_api_database_path",
+    "resolve_cors_origins",
 ]

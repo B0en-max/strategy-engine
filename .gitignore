@@ -58,6 +58,13 @@ logs/*
 .coverage.*
 htmlcov/
 
+# --- Node / 前端（Stage 17）---
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+
 # --- 编辑器与操作系统 ---
 .vscode/
 .idea/

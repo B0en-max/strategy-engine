@@ -395,6 +395,23 @@ $env:STRATEGY_ENGINE_DB_PATH = "C:\path\to\strategy_engine.db"
   **正式库只读校验**、全部使用临时库）
 - [x] 真实启动 uvicorn 完成冒烟验证（见第 3 节），正式库未被修改
 
+### Stage 17 — 第一版执行器前端（React + Vite）
+
+- [x] `frontend/`：React + Vite 前端（`npm run dev` → http://127.0.0.1:5173）
+  * 左侧：策略 / 标的 / 周期 / 可选起止时间 + 运行策略
+  * 中间：Signals（timestamp / direction / price / reason / status + pending 的「模拟执行」按钮）
+  * 右侧：Positions；下方：Orders / Trades
+  * 页面加载时拉取 strategies / symbols，调用 `/health` 显示 API 连接状态；信号每 10s 自动刷新（可关）
+- [x] `frontend/src/config.js`：API 地址唯一来源 `VITE_API_BASE_URL`（默认 `http://127.0.0.1:8000`），组件内不写死
+- [x] `frontend/src/api/client.js`：唯一 HTTP 出口（URL 拼接 / 请求体 / 404·409·400·422 与连接失败的可读错误）
+- [x] `frontend/src/components/*`：纯展示 + 回调，**不含任何策略 / 订单 / 成交 / 持仓逻辑**
+- [x] `frontend/tests/`：最小化前端测试（vitest；API 调用逻辑 + 核心组件用 `react-dom/server` 渲染，不引入 jsdom）
+- [x] `api/app.py`：新增可配置 CORS（默认只允许本地 Vite 地址），不改任何业务逻辑
+- [x] `config/settings.py`：新增 `ENV_CORS_ORIGINS`（`STRATEGY_ENGINE_CORS_ORIGINS`，逗号分隔）
+- [x] `tests/test_api_cors.py`：7 个测试（默认来源 / 环境变量 / 显式入参 / 预检 OPTIONS / 未列出来源不放行）
+- [x] 端到端人工验收（临时库，正式库只读）：无头 Chromium 中真实点击「运行策略」→ 20 条 pending 信号 →
+  「模拟执行」→ Positions 1 条 / Orders 1 条 / Trades 1 条，全部 200 OK
+
 #### 当前已支持
 
 - `symbols` 标的
@@ -410,17 +427,19 @@ $env:STRATEGY_ENGINE_DB_PATH = "C:\path\to\strategy_engine.db"
 - **基础回测引擎**：K 线 → 信号 → 模拟成交 → 订单/成交/持仓 → 回测结果（独立临时库，正式库只读）
 - **基础绩效统计**：已实现盈亏、盈亏笔数、胜率、平均盈亏、profit factor（逐笔可审计）
 - **执行器 API 层**：FastAPI 接口供前端调用（本地模拟执行）
+- **第一版执行器前端**：React + Vite 页面，可在浏览器里选策略/标的/周期、运行策略、
+  查看信号、对 pending 信号模拟执行、查看持仓/订单/成交（仅操作本地模拟执行器）
 
 #### 当前仍未实现
 
-前端界面、实时行情推送与定时采集、无人值守自动交易、风控（Risk Manager）、
+实时行情推送与定时采集、无人值守自动交易、风控（Risk Manager）、
 回测增强（手续费 / 滑点 / 资金管理 / 杠杆 / 防过拟合流程）、
 浮盈与资金曲线、Sharpe / 最大回撤等复杂风险指标、交易复盘、复杂指标与最终交易策略、
 AI、MCP、实盘交易（**未连接任何真实交易所**）。
 
 ## 7. 后续阶段会逐步加入的内容（均尚未实现）
 
-- 阶段 17（下一阶段）：**执行器前端**（第一版界面：查看策略/信号/持仓，运行策略、模拟执行信号）
+- 前端增强：Stage 17 已交付第一版可操作界面；图表 / Dashboard / 时间范围可视化等按需再扩（本阶段刻意不做）
 - 自动化串联：定时跑策略 → 风控 → 模拟执行（当前各环节需手动调用）
 - 风控（Risk Manager）：独立于策略放行信号（当前模拟执行器不做风控判断）
 - 回测增强：手续费 / 滑点 / 资金管理 / 杠杆、浮盈与资金曲线、Sharpe / 最大回撤等风险指标、防过拟合验证（Train / Validation / Test / Walk-forward / Stress Test）
@@ -454,6 +473,34 @@ cd C:\Users\T14\Projects\strategy-engine
 .venv\Scripts\python.exe -m uvicorn api.app:app --host 127.0.0.1 --port 8000
 # 交互式文档：http://127.0.0.1:8000/docs
 ```
+
+### 启动前端（Stage 17）
+
+前端在 `frontend/`（React + Vite），只做展示 / 输入 / 调用 API，**不含任何策略、订单、成交、持仓逻辑**。
+API 地址统一由 `VITE_API_BASE_URL` 提供（默认 `http://127.0.0.1:8000`），不在组件里写死。
+
+```powershell
+# 1）启动后端（项目根目录；仅监听本机）
+.venv\Scripts\python.exe -m uvicorn api.app:app --host 127.0.0.1 --port 8000
+
+# 2）安装前端依赖并启动（frontend 目录）
+cd frontend
+npm install
+npm run dev            # 开发服务器 http://127.0.0.1:5173
+
+# 3）浏览器访问
+# http://127.0.0.1:5173
+```
+
+- 操作链路：选择策略 / 标的 / 周期 → 「运行策略」→ 查看 Signals →
+  对 pending 信号点「模拟执行」→ 查看 Positions / Orders / Trades
+- 前端只操作**本地模拟执行器**：页面上的「模拟执行」不会下单到任何真实交易所
+- 跨域：后端默认只允许 `http://127.0.0.1:5173` 与 `http://localhost:5173`，
+  可用环境变量 `STRATEGY_ENGINE_CORS_ORIGINS`（逗号分隔）覆盖
+- 前端最小测试：`npm run test`（vitest；组件用 `react-dom/server` 渲染，不引入 jsdom）
+- 备注：建立本阶段时本机**未安装 Node.js / npm**，因此 `npm install` 未在本机执行过；
+  前端代码的正确性是靠在沙箱里手工还原依赖（react/react-dom/esbuild）+ 无头 Chromium
+  真实渲染与点击验收的（详见 Stage 17 验收报告）
 
 ### 行情数据导入（Stage 12 接入的数据源）
 

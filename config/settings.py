@@ -18,6 +18,10 @@ ENV_TIMEOUT: Final[str] = "STRATEGY_ENGINE_DATA_SOURCE_TIMEOUT"
 #: 数据库路径覆盖（可选）：API 层与其它入口都从这里读，不写死绝对路径
 ENV_DB_PATH: Final[str] = "STRATEGY_ENGINE_DB_PATH"
 
+#: 允许跨域访问 API 的浏览器来源（逗号分隔，Stage 17 前端需要）；
+#: 不设置时只允许本地开发的 Vite 地址，不放开任意来源
+ENV_CORS_ORIGINS: Final[str] = "STRATEGY_ENGINE_CORS_ORIGINS"
+
 #: 时间格式取值：秒级时间戳 / 毫秒级时间戳 / 'YYYY-MM-DD HH:MM:SS'（UTC）
 TIMESTAMP_FORMATS: Final[tuple[str, ...]] = ("seconds", "milliseconds", "datetime")
 

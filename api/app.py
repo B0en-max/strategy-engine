@@ -19,6 +19,10 @@
 默认落到项目统一默认路径（`database.resolve_database_path`），
 **不在本文件里写死任何绝对路径**。
 
+浏览器跨域（Stage 17 前端）：仅允许本地开发的前端地址访问，来源可由
+环境变量 `STRATEGY_ENGINE_CORS_ORIGINS`（逗号分隔）或 `create_app(cors_origins=...)` 覆盖。
+本层仍然**不做登录 / 权限 / HTTPS**，也不连接任何真实交易所。
+
 启动方式（本地开发）：
     .venv\\Scripts\\python.exe -m uvicorn api.app:app --reload --port 8000
 """
@@ -29,12 +33,13 @@ import os
 import sqlite3
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Final, Sequence
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from config import ENV_DB_PATH
+from config import ENV_CORS_ORIGINS, ENV_DB_PATH
 from database import (
     KlineRepository,
     OrderRepository,
@@ -58,6 +63,12 @@ API_DESCRIPTION = (
 )
 
 router = APIRouter()
+
+#: 默认允许的浏览器来源：只覆盖本地开发用的 Vite 地址（127.0.0.1 与 localhost 两种写法）
+DEFAULT_CORS_ORIGINS: Final[tuple[str, ...]] = (
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+)
 
 
 # --------------------------------------------------------------------------- 工具
@@ -272,15 +283,53 @@ def resolve_api_database_path(explicit: str | Path | None = None) -> Path:
     return resolve_database_path(os.environ.get(ENV_DB_PATH))
 
 
-def create_app(db_path: str | Path | None = None) -> FastAPI:
+def resolve_cors_origins(explicit: str | Sequence[str] | None = None) -> list[str]:
+    """统一解析允许跨域的来源：显式入参 > 环境变量 > 本地开发默认值。
+
+    显式入参 / 环境变量都接受「逗号分隔字符串」或「字符串序列」，
+    空白会被忽略（便于本地用逗号列表配置多个端口）。
+    """
+    if explicit is None:
+        raw = os.environ.get(ENV_CORS_ORIGINS) or ""
+        source: list[str] = raw.split(",") if raw else list(DEFAULT_CORS_ORIGINS)
+    elif isinstance(explicit, str):
+        source = explicit.split(",")
+    else:
+        source = [str(item) for item in explicit]
+
+    origins: list[str] = []
+    for item in source:
+        # 每一项都允许再写逗号（环境变量/序列两种写法统一处理），并去重
+        for part in str(item).split(","):
+            cleaned = part.strip()
+            if cleaned and cleaned not in origins:
+                origins.append(cleaned)
+    return origins
+
+
+def create_app(
+    db_path: str | Path | None = None,
+    cors_origins: str | Sequence[str] | None = None,
+) -> FastAPI:
     """创建 API 应用。
 
     参数：
-        db_path 可选：显式指定数据库；不传则读环境变量 `STRATEGY_ENGINE_DB_PATH`，
-                再退到项目统一默认路径（不会写死绝对路径）。
+        db_path     可选：显式指定数据库；不传则读环境变量 `STRATEGY_ENGINE_DB_PATH`，
+                    再退到项目统一默认路径（不会写死绝对路径）。
+        cors_origins 可选：允许跨域的浏览器来源；不传则读环境变量
+                    `STRATEGY_ENGINE_CORS_ORIGINS`，再退到本地开发默认值。
     """
     app = FastAPI(title=API_TITLE, version=API_VERSION, description=API_DESCRIPTION)
     app.state.db_path = resolve_api_database_path(db_path)
+    app.state.cors_origins = resolve_cors_origins(cors_origins)
+    # 允许凭据（Cookie）保持关闭：本层没有登录态，避免无意义的宽松授权
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(app.state.cors_origins),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "Accept"],
+    )
     app.include_router(router)
     app.add_exception_handler(ValueError, _value_error_handler)
     app.add_exception_handler(sqlite3.IntegrityError, _integrity_error_handler)
