@@ -7,9 +7,10 @@
     signals     —— 策略产生的交易信号（Stage 06）
     trades      —— 实际发生的成交记录（Stage 07）
     positions   —— 当前实际持仓（Stage 08）
+    orders      —— 准备执行 / 提交给执行器的订单（Stage 09）
 
 尚未创建的后续业务表：
-    orders / backtests / performance / reviews / optimization_candidates
+    backtests / performance / reviews / optimization_candidates
     —— 属于后续阶段，本阶段一律不建。
 
 schema 版本存放在 SQLite 原生 PRAGMA user_version 中，便于将来做迁移。
@@ -27,7 +28,7 @@ from datetime import datetime, timezone
 from typing import Final
 
 # 当前 schema 版本。后续阶段新增/修改表结构时应递增，并补上迁移逻辑。
-SCHEMA_VERSION: Final[int] = 6
+SCHEMA_VERSION: Final[int] = 7
 
 # 时间统一格式（SQLite 稳定支持，不引入第三方时间库）
 TIMESTAMP_FORMAT: Final[str] = "%Y-%m-%d %H:%M:%S"
@@ -41,6 +42,7 @@ STRATEGIES_TABLE: Final[str] = "strategies"
 SIGNALS_TABLE: Final[str] = "signals"
 TRADES_TABLE: Final[str] = "trades"
 POSITIONS_TABLE: Final[str] = "positions"
+ORDERS_TABLE: Final[str] = "orders"
 
 # 数据库初始化后应当存在的业务表（后续阶段新增表时在这里登记）
 BUSINESS_TABLES: Final[tuple[str, ...]] = (
@@ -50,6 +52,7 @@ BUSINESS_TABLES: Final[tuple[str, ...]] = (
     SIGNALS_TABLE,
     TRADES_TABLE,
     POSITIONS_TABLE,
+    ORDERS_TABLE,
 )
 
 # ---------------------------------------------------------------------------
@@ -286,6 +289,65 @@ CREATE TABLE IF NOT EXISTS {POSITIONS_TABLE} (
 # 所以**不再**额外创建索引。
 
 
+# ---------------------------------------------------------------------------
+# orders：准备执行 / 提交给执行器的订单
+#
+# 设计要点：
+#   1. 定位：订单是**准备执行**的意图，不是成交（trade），也不是持仓（position）。
+#      本阶段只建立数据层：不会自动创建订单、不会自动成交、
+#      不会改 Position、不会生成 Trade。
+#   2. signal_id 可为空（手工下单可无 Signal），非空时外键引用 signals(id)；
+#      symbol_id 必填，外键引用 symbols(id)。
+#   3. price 可为空：市价单（market）没有限价；限价单（limit）应当带 price。
+#      这里**不**强制 "limit 必须有 price" 的交叉约束（属于执行层业务规则，
+#      数据层只做基本完整性）。
+#   4. 枚举型字段全部用数据库 CHECK 限定取值。
+#   5. 时间：created_at 为订单记录创建时间，updated_at 随状态变更刷新（均为 UTC）。
+#   6. quantity / price 用 REAL，故意不加正值限制（与项目既有约定一致）。
+# ---------------------------------------------------------------------------
+# 买卖方向沿用 trades 的取值（订单方向与成交方向必须一致，避免两处各写一份）
+ORDER_SIDES: Final[tuple[str, ...]] = TRADE_SIDES
+ORDER_TYPES: Final[tuple[str, ...]] = ("market", "limit")
+ORDER_STATUSES: Final[tuple[str, ...]] = (
+    "pending",
+    "submitted",
+    "filled",
+    "cancelled",
+    "rejected",
+)
+DEFAULT_ORDER_STATUS: Final[str] = "pending"
+
+_ORDER_SIDE_SQL_LIST: Final[str] = ", ".join(f"'{s}'" for s in ORDER_SIDES)
+_ORDER_TYPE_SQL_LIST: Final[str] = ", ".join(f"'{t}'" for t in ORDER_TYPES)
+_ORDER_STATUS_SQL_LIST: Final[str] = ", ".join(f"'{s}'" for s in ORDER_STATUSES)
+
+CREATE_ORDERS_TABLE_SQL: Final[str] = f"""
+CREATE TABLE IF NOT EXISTS {ORDERS_TABLE} (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id  INTEGER REFERENCES {SIGNALS_TABLE}(id),
+    symbol_id  INTEGER NOT NULL REFERENCES {SYMBOLS_TABLE}(id),
+    side       TEXT    NOT NULL,
+    quantity   REAL    NOT NULL,
+    price      REAL,
+    order_type TEXT    NOT NULL,
+    status     TEXT    NOT NULL DEFAULT '{DEFAULT_ORDER_STATUS}',
+    created_at TEXT    NOT NULL DEFAULT (strftime('{TIMESTAMP_FORMAT}', 'now')),
+    updated_at TEXT    NOT NULL DEFAULT (strftime('{TIMESTAMP_FORMAT}', 'now')),
+    CONSTRAINT ck_orders_side CHECK (side IN ({_ORDER_SIDE_SQL_LIST})),
+    CONSTRAINT ck_orders_order_type CHECK (order_type IN ({_ORDER_TYPE_SQL_LIST})),
+    CONSTRAINT ck_orders_status CHECK (status IN ({_ORDER_STATUS_SQL_LIST}))
+)
+"""
+
+# 索引说明：orders 表没有唯一约束（也就没有隐式索引）。最常见的查询是
+# 「某个标的的订单 + 按时间排序 / 时间区间」，因此显式建立这个复合索引。
+# 按 status / signal_id 筛选目前没有专用索引，后续如有需要再根据实际查询添加。
+CREATE_ORDERS_INDEX_SQL: Final[str] = f"""
+CREATE INDEX IF NOT EXISTS idx_orders_symbol_created_at
+    ON {ORDERS_TABLE} (symbol_id, created_at)
+"""
+
+
 def utc_now_str() -> str:
     """返回当前 UTC 时间字符串（统一格式 TIMESTAMP_FORMAT）。"""
     return datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT)
@@ -307,5 +369,7 @@ def initialization_statements() -> list[tuple[str, tuple[object, ...]]]:
         (CREATE_TRADES_TABLE_SQL, ()),
         (CREATE_TRADES_INDEX_SQL, ()),
         (CREATE_POSITIONS_TABLE_SQL, ()),
+        (CREATE_ORDERS_TABLE_SQL, ()),
+        (CREATE_ORDERS_INDEX_SQL, ()),
         (f"PRAGMA user_version = {SCHEMA_VERSION:d}", ()),
     ]

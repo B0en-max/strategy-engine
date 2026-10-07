@@ -24,28 +24,29 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 
 ## 3. 当前开发阶段
 
-**Stage 08 — 持仓（Position）数据层**
+**Stage 09 — 订单（Order）数据层**
 
-已建立持仓表 `positions` 与 `PositionRepository`：
+已建立订单表 `orders` 与 `OrderRepository`：
 
-- **同一 symbol 只能有一条持仓**：由数据库 `UNIQUE(symbol_id)` 强制，不做重复的 Python 校验
-- **引用完整性**：`symbol_id → symbols(id)` 为真实外键，由数据库强制
-- `quantity` 允许为 0（已清仓）或负数（做空），不加正值限制
-- 本阶段只做**存储层**：**不会**根据 trades 自动推算持仓，也不做盈亏计算
+- **定位**：订单是**准备执行 / 提交给执行器的意图**，不是成交（trades），也不是持仓（positions）
+- **枚举约束**：`side`（buy/sell）、`order_type`（market/limit）、`status`
+  （pending/submitted/filled/cancelled/rejected）全部由数据库 CHECK 限定
+- **可空字段**：`signal_id` 可为空（手工下单）、`price` 可为空（市价单）
+- 本阶段**不会**自动创建订单、自动成交、修改 Position 或生成 Trade
 
 > **时间语义（全局约定）**：所有时间戳为 **UTC**，格式 `YYYY-MM-DD HH:MM:SS`；
 > `klines.timestamp` = K 线开始时间；`signals.timestamp` = 信号发生时间；
-> `trades.timestamp` = 成交发生时间；`positions.updated_at` = 持仓最后更新时间。
+> `trades.timestamp` = 成交发生时间；`orders.created_at` = 订单创建时间（时间范围筛选针对它）。
 
 （Stage 01 骨架；Stage 02 SQLite 连接/事务/最小数据访问层；Stage 03 symbols；
-Stage 04 klines；Stage 05 strategies；Stage 06 signals；Stage 07 trades。）
+Stage 04 klines；Stage 05 strategies；Stage 06 signals；Stage 07 trades；Stage 08 positions。）
 
 ## 4. 总体模块（规划）
 
 | 目录 | 职责 | 当前状态 |
 |---|---|---|
 | `config/` | 配置集中管理（路径、参数、运行模式） | 空包，仅占位 |
-| `database/` | SQLite 长期数据基础（连接、事务、各业务表访问层） | 基础设施 + `symbols` + `klines` + `strategies` + `signals` + `trades` + `positions` |
+| `database/` | SQLite 长期数据基础（连接、事务、各业务表访问层） | 基础设施 + `symbols` + `klines` + `strategies` + `signals` + `trades` + `positions` + `orders` |
 | `data/raw/` | 原始行情数据落地 | 仅目录，未实现采集 |
 | `data/processed/` | 清洗/加工后的中间数据 | 仅目录，未实现处理 |
 | `data/cache/` | 可重建的缓存（不入库） | 仅目录 |
@@ -158,6 +159,24 @@ Stage 04 klines；Stage 05 strategies；Stage 06 signals；Stage 07 trades。）
 - 该唯一约束已生成隐式索引（`sqlite_autoindex_positions_1`），即按 symbol 查找的路径，不再重复建索引
 - 本表**只做存储**：不会根据 `trades` 自动推算持仓，也不做盈亏计算
 
+### `orders` — 订单（Stage 09）
+
+| 字段 | 类型 | 约束 |
+|---|---|---|
+| `id` | INTEGER | PRIMARY KEY AUTOINCREMENT |
+| `signal_id` | INTEGER | **可空**，FOREIGN KEY → `signals(id)`（手工下单可无 Signal） |
+| `symbol_id` | INTEGER | NOT NULL，FOREIGN KEY → `symbols(id)` |
+| `side` | TEXT | NOT NULL，CHECK IN (buy/sell) |
+| `quantity` | REAL | NOT NULL |
+| `price` | REAL | **可空**（市价单无限价） |
+| `order_type` | TEXT | NOT NULL，CHECK IN (market/limit) |
+| `status` | TEXT | NOT NULL，DEFAULT `'pending'`，CHECK IN (pending/submitted/filled/cancelled/rejected) |
+| `created_at` / `updated_at` | TEXT | NOT NULL，DEFAULT 当前 UTC 时间 |
+
+- 索引：`idx_orders_symbol_created_at (symbol_id, created_at)`
+- 数据层**不**强制“limit 单必须有 price”（属于执行层业务规则）
+- 本表**只记录订单意图**：不会自动成交、不会改持仓、不会生成成交记录
+
 ## 6. 各阶段已完成的内容
 
 ### Stage 01 — 项目骨架
@@ -225,6 +244,13 @@ Stage 04 klines；Stage 05 strategies；Stage 06 signals；Stage 07 trades。）
 - [x] `database/__init__.py`：对外导出 `PositionRepository`
 - [x] `tests/test_positions.py`：19 个测试（建表与约束、创建/查询/更新、symbol 唯一性、外键、列表、持久化）
 
+### Stage 09 — 订单（Order）数据层
+
+- [x] `database/models.py`：新增 `orders` 表（schema 版本 → 7）；两个真实外键 + 三个枚举 CHECK；建立复合索引
+- [x] `database/order_repository.py`：`OrderRepository`（create / get / list / update_status / count）
+- [x] `database/__init__.py`：对外导出 `OrderRepository`
+- [x] `tests/test_orders.py`：26 个测试（建表与约束、创建/查询、market/limit、状态更新、外键、筛选与计数、持久化）
+
 #### 当前已支持
 
 - `symbols` 标的
@@ -236,16 +262,19 @@ Stage 04 klines；Stage 05 strategies；Stage 06 signals；Stage 07 trades。）
 - `signals` 交易信号（含策略 / 标的引用、long / short、pending / executed / cancelled）
 - `trades` 实际成交记录（buy / sell、可关联 Signal 或手工交易）
 - `positions` 当前持仓（每个 symbol 一条）
+- `orders` 订单（market / limit、五种状态、可关联 Signal 或手工下单）
 
 #### 当前仍未实现
 
-订单系统、盈亏计算（PnL）、执行层、复盘、策略修改、回测、真实行情数据源、实盘交易、AI、API、MCP
-（也尚无信号生成逻辑；持仓不会根据 trades 自动推算：Stage 05~08 建立的都是**数据层**）。
+执行器、盈亏计算（PnL）、复盘、策略修改、回测、真实行情数据源、实盘交易、AI、API、MCP
+（也尚无信号生成逻辑；持仓不会根据 trades 自动推算；订单不会自动成交或生成成交记录：
+Stage 05~09 建立的都是**数据层**）。
 
 ## 7. 后续阶段会逐步加入的内容（均尚未实现）
 
-- 阶段 09 起：真实行情数据接入（数据采集 / 数据清洗 / 原始数据入库）—— 当前未接入任何外部行情源
+- 阶段 10 起：真实行情数据接入（数据采集 / 数据清洗 / 原始数据入库）—— 当前未接入任何外部行情源
 - 策略逻辑实现与信号生成（Stage 05 / 06 只建立了策略定义与信号数据层，尚无生成逻辑）
+- 执行器：根据 Order 实际执行并生成 Trade / 更新 Position（当前只有数据层）
 - 回测引擎
 - 风控（Risk Manager，独立于策略）
 - 模拟执行 / Paper Trading
