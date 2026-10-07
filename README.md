@@ -24,74 +24,59 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 
 ## 3. 当前开发阶段
 
-**Stage 12 — 接入真实 K 线数据源并完成历史数据导入**
+**Stage 13 — 策略运行器（Strategy Runner）**
 
-已接入**真实公开行情接口**并完成历史数据导入（Stage 11 的通用采集层之上，只加了该数据源所需的最小配置）。
+已建立 `strategies/`（策略接口 + 示例策略 + 运行器）：
 
-### 使用的数据源：新浪财经
-
-| 项目 | 说明 |
-|---|---|
-| 接口 | `https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData` |
-| 定位 | A 股 / ETF 等历史 K 线（日内 5/15/30/60 分钟、日线） |
-| 认证 | **无需认证（无 API Key）** |
-| 字段 | `day / open / high / low / close / volume`（数字以字符串返回，已容错解析） |
-| 成交额 | 该接口不返回 → `klines.amount` 为 NULL |
-| 时间语义 | 日内周期的标签是 K 线**结束**时间 → 已按周期回退成**开始**时间（如 `09:45` → `09:30`）；日线标签是日期，不回退 |
-| 时间范围 | 该接口不支持起止时间参数，只能取最近 N 根 → 由 `import_klines` 在本地按区间裁切 |
-
-接入方式：`data_source/presets.py` 的 `sina_cn_kline_config()` 返回一份 `DataSourceConfig`，
-复用 Stage 11 的 `HttpKlineDataSource`（未改动其通用设计，只新增了四个最小配置项：
-`timeframe_mapping`、`timestamp_semantics`、`start_param/end_param` 可为 None、数字/时间字符串容错）。
-
-> 选型说明：本项目实际环境下 Binance / OKX / Coinbase / Yahoo 均不可达（DNS 或连接被拒），
-> 新浪财经接口公开放行、免费、无需认证，因此选它作为首个真实数据源。
-> 换其他数据源只需实现 `KlineDataSource` 或写一份新的配置。
-
-### 环境变量配置
-
-| 环境变量 | 必填 | 说明 |
-|---|---|---|
-| `STRATEGY_ENGINE_DATA_SOURCE_URL` | 否 | 数据源地址；不设置时用内置的新浪公开地址 |
-| `STRATEGY_ENGINE_DATA_SOURCE_API_KEY` | 否 | 认证密钥（新浪不需要；**通过请求头发送**，不会出现在 URL 与错误信息里） |
-| `STRATEGY_ENGINE_DATA_SOURCE_TIMEOUT` | 否 | 超时秒数，默认 10 |
-
-仓库内的 `.env.example` 已列出上述变量（**不含任何真实密钥**）。
-
-### 如何执行一次历史 K 线导入
-
-```powershell
-# 15 分钟：最近 320 根（约 20 个交易日）
-.venv\Scripts\python.exe -m data_source.cli --symbol 600519 --api-symbol sh600519 `
-    --name 贵州茅台 --timeframe 15m --datalen 320
-
-# 日线：最近 60 根
-.venv\Scripts\python.exe -m data_source.cli --symbol 600519 --api-symbol sh600519 --timeframe 1d --datalen 60
+```
+strategies.config ─┐
+                   ├─→ Strategy.generate() ─→ signals 表
+klines (symbol+tf) ─┘
 ```
 
-- `--api-symbol` 是数据源代码（新浪：沪市 `sh600519`、深市 `sz000001`）
-- 标的未在 `symbols` 表中时会自动创建（可用 `--market/--asset-type/--name` 指定）
-- `--start/--end`（UTC `YYYY-MM-DD HH:MM:SS`）可选，只在本地裁切范围
-- 重复执行同一时间段**不会产生重复数据**（upsert + 唯一约束）
+- `strategies/base.py`：`Bar` / `SignalCandidate` / `Strategy` 接口（**与数据库解耦**，策略可单独测试）
+- `strategies/close_direction.py`：**最简示例策略**——当前收盘价 > 前一根 → `long`，< → `short`，相等 → 不产生信号
+- `strategies/runner.py`：`StrategyRunner.run(strategy_id, symbol_id, timeframe)`
+  * 按 `strategy_id` 读策略配置，按 `symbol_id` + `timeframe` 读 K 线（**升序**参与计算）
+  * 策略实现由 `config["type"]` 选择（缺省 `close_direction`），**逻辑不写死在 Runner 里**
+  * 写信号：`strategy_id / symbol_id / timeframe / timestamp / direction / price / reason`
+  * 落库在**单个事务**里（`unit_of_work`），失败整批回滚
+  * 同一 `(strategy, symbol, timeframe, timestamp)` 已有信号会**跳过**（可重复运行，不产生重复信号）
+  * **不创建 Order / Trade / Position**（运行器里根本没有这三个 Repository）
 
-### 本次真实导入结果（人工验收）
+策略参数只来自 `strategies.config`，例如：
 
-写入 `data/strategy_engine.db`（该文件不入 Git）：
+```json
+{"type": "close_direction", "min_move": 0.02}
+```
 
-| 标的 | 周期 | 行数 | 时间范围 | 校验 |
+`min_move` 为可选（默认 0 = 严格按涨/跌判断）；示例策略只用于验证链路，**不是最终交易策略**。
+
+```python
+from strategies import StrategyRunner
+
+result = StrategyRunner().run(strategy_id=1, symbol_id=1, timeframe="15m")
+# RunResult(bars=320, signals=319, long_signals=138, short_signals=181, skipped=0, ...)
+```
+
+### 本次人工验收（真实数据，临时库）
+
+把正式库里的真实 600519 K 线复制到临时库后运行示例策略：
+
+| 周期 | 参与计算 K 线 | 写入信号 | long / short | 重复运行 |
 |---|---|---|---|---|
-| 600519 贵州茅台（CN/STOCK） | 15m | 320 | 2026-09-02 09:30 ~ 2026-09-30 14:45 | 20 个交易日 × 16 根，时间网格与 A 股 09:30~14:45 完全一致 |
-| 600519 贵州茅台（CN/STOCK） | 1d | 60 | 2026-07-08 ~ 2026-09-30 | 无重复日期，间隔均为 1/3/4 天（周末与假期） |
+| 15m | 320 | 319 | 138 / 181 | 新写入 0，跳过 319 |
+| 1d | 60 | 59 | 28 / 31 | 新写入 0，跳过 59 |
 
-其他校验：OHLC 非法行 0、`high >= low` 全部成立、价格均为正、无重复 `(symbol, timeframe, timestamp)`、
-时间严格升序；**重复导入后行数不变**。
+信号按时间升序、字段完整（例：`close 1297.44 -> 1293.07`）；临时库中 order/trade/position 数量为 **0/0/0**；
+**未向正式库写入任何信号**（正式库 `signals` 仍为 0 行）。
 
 > **时间语义（全局约定）**：所有时间戳为 **UTC**，格式 `YYYY-MM-DD HH:MM:SS`；
-> `klines.timestamp` = K 线开始时间；`signals.timestamp` = 信号发生时间；
+> `klines.timestamp` = K 线开始时间；`signals.timestamp` = 信号发生时间（示例策略取当前 K 线时间）；
 > `trades.timestamp` = 成交发生时间；`orders.created_at` = 订单创建时间。
 
 （Stage 01 骨架；02 SQLite 基础；03 symbols；04 klines；05 strategies；06 signals；
-07 trades；08 positions；09 orders；10 模拟执行器；11 K 线采集层。）
+07 trades；08 positions；09 orders；10 模拟执行器；11 K 线采集层；12 真实数据源。）
 
 ## 4. 总体模块（规划）
 
@@ -103,7 +88,7 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 | `data/processed/` | 清洗/加工后的中间数据 | 仅目录，未实现处理 |
 | `data/cache/` | 可重建的缓存（不入库） | 仅目录 |
 | `data_source/` | 行情数据采集（数据源接口 + HTTP/JSON 实现 + 预设 + 导入 CLI） | 已实现：已接入**新浪财经**并完成真实历史导入 |
-| `strategies/` | 策略实现（版本化：v1 / v2 / v3 …） | 目录为空；策略定义与版本记录已在数据库层建立，策略逻辑尚未实现 |
+| `strategies/` | 策略实现（版本化：v1 / v2 / v3 …） | 已有策略接口 + 示例策略 + **策略运行器**（产生信号） |
 | `backtest/` | 回测引擎（严格按时间顺序，禁止未来数据泄漏） | 空包，仅占位 |
 | `execution/` | 执行层（只机械执行已批准的信号，不自己判断市场） | **模拟执行器已实现**（`execution/engine.py`），无实盘 |
 | `review/` | 交易记录与复盘 | 空包，仅占位 |
@@ -337,13 +322,29 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 - [x] `tests/test_sina_source.py`：14 个测试（预设配置、请求构造、字符串型数字、
   15m 结束→开始回退、日线不回退、本地裁切、重复导入、CLI 汇总；**全部用 mock，不联网**）
 - [x] `tests/test_data_source.py`：新增 10 个通用扩展测试
-- [x] 真实验收：600519 的 15m 320 根 + 1d 60 根写入正式库（详见第 3 节），重复导入行数不变
+- [x] 真实验收：600519 的 15m 320 根 + 1d 60 根写入正式库（详见「行情数据导入」一节），重复导入行数不变
+
+### Stage 13 — 策略运行器（Strategy Runner）
+
+- [x] `strategies/base.py`：`Bar` / `SignalCandidate` / `Strategy` 接口（与数据库解耦）
+- [x] `strategies/close_direction.py`：最简示例策略（相邻收盘价方向），参数从 config 读（`min_move`）
+- [x] `strategies/runner.py`：`StrategyRunner`
+  * 按 `strategy_id` 读参数、按 `symbol_id`+`timeframe` 读 K 线（升序）
+  * 策略实现由 `config["type"]` 选择，注册表可注入（策略逻辑不写死在 Runner 里）
+  * 信号写入 `signals`：`strategy_id/symbol_id/timeframe/timestamp/direction/price/reason`
+  * 单事务落库（失败整批回滚）；已有信号会跳过（可重复运行）
+  * **不创建 Order / Trade / Position**
+- [x] `strategies/__init__.py`：对外导出
+- [x] `tests/test_strategy_runner.py`：24 个测试（读配置、读 K 线、时间顺序、long/short/无信号、
+  信号字段、不产生交易对象、重复运行、写入失败回滚、纯策略计算、临时库隔离）
+- [x] 人工验收：真实 600519 K 线复制到临时库跑通（15m 319 条 / 1d 59 条信号，0/0/0 交易对象）
 
 #### 当前已支持
 
 - `symbols` 标的
-- `klines` K 线（OHLCV）—— 已含**真实历史数据**
+- `klines` K 线（OHLCV）—— 已含**真实历史数据**（新浪财经）
 - `strategies` 策略定义（含 version / config / status）
+- **策略运行器**：策略配置 + K 线 → `signals`（示例策略，逻辑可替换）
 - `signals` 交易信号
 - `trades` 实际成交记录
 - `positions` 当前持仓
@@ -353,13 +354,13 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 
 #### 当前仍未实现
 
-实时行情推送与定时采集、实盘交易（OKX / 券商 API）、回测、盈亏计算（PnL）、复盘、
-策略逻辑与信号生成、策略修改、风控（Risk Manager）、AI、API、MCP、前端。
+实时行情推送与定时采集、自动交易（信号 → 自动下单）、风控（Risk Manager）、回测、
+盈亏计算（PnL）、复盘、复杂指标与最终交易策略、AI、API、MCP、前端、实盘交易。
 
 ## 7. 后续阶段会逐步加入的内容（均尚未实现）
 
-- 阶段 13 起：实时行情 / 定时采集调度（当前只支持手动按需拉取历史 K 线）
-- 策略逻辑实现与信号生成（Stage 05 / 06 只建立了策略定义与信号数据层，尚无生成逻辑）
+- 阶段 14 起：实时行情 / 定时采集调度（当前只支持手动按需拉取历史 K 线）
+- 自动化串联：定时跑策略 → 风控 → 模拟执行（当前各环节需手动调用）
 - 风控（Risk Manager）：独立于策略放行信号（当前模拟执行器不做风控判断）
 - 回测引擎与防过拟合验证（Train / Validation / Test / Walk-forward / Stress Test）
 - 盈亏计算（PnL）与交易复盘
@@ -388,6 +389,49 @@ cd C:\Users\T14\Projects\strategy-engine
 # 安装依赖（当前阶段不会安装任何东西）
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
+
+### 行情数据导入（Stage 12 接入的数据源）
+
+数据源：**新浪财经** `https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData`
+（公开、免费、**无需认证**；字段 `day/open/high/low/close/volume`，无成交额）。
+
+- 日内周期的时间标签是 K 线**结束**时间 → 入库前自动回退为**开始**时间（如 `09:45` → `09:30`）
+- 该接口不支持起止时间参数（只能取最近 N 根）→ 时间范围在本地按闭区间裁切
+- 重复导入同一时间段**不会产生重复数据**（upsert + 唯一约束）
+
+| 环境变量 | 必填 | 说明 |
+|---|---|---|
+| `STRATEGY_ENGINE_DATA_SOURCE_URL` | 否 | 不设置时用内置新浪公开地址 |
+| `STRATEGY_ENGINE_DATA_SOURCE_API_KEY` | 否 | 新浪不需要；如需认证走**请求头**，不进 URL 与错误信息 |
+| `STRATEGY_ENGINE_DATA_SOURCE_TIMEOUT` | 否 | 超时秒数，默认 10 |
+
+环境变量示例见仓库内 `.env.example`（**不含任何真实密钥**）。
+
+```powershell
+# 15 分钟：最近 320 根（约 20 个交易日）
+.venv\Scripts\python.exe -m data_source.cli --symbol 600519 --api-symbol sh600519 `
+    --name 贵州茅台 --timeframe 15m --datalen 320
+
+# 日线：最近 60 根
+.venv\Scripts\python.exe -m data_source.cli --symbol 600519 --api-symbol sh600519 --timeframe 1d --datalen 60
+```
+
+当前正式库中已有：600519 贵州茅台（CN/STOCK）15m 320 根（2026-09-02 09:30 ~ 2026-09-30 14:45）、
+1d 60 根（2026-07-08 ~ 2026-09-30）。
+
+### 运行策略产生信号（Stage 13）
+
+```python
+from strategies import StrategyRunner
+
+runner = StrategyRunner()                 # 默认数据库 data/strategy_engine.db
+result = runner.run(strategy_id=1, symbol_id=1, timeframe="15m")
+print(result)   # RunResult(bars=320, signals=319, long_signals=138, short_signals=181, ...)
+```
+
+- 策略实现由 `strategies.config["type"]` 选择（内置：`close_direction`）
+- 只写 `signals` 表，**不会**创建 Order / Trade / Position
+- 可重复运行：已有信号的 `(strategy, symbol, timeframe, timestamp)` 会被跳过
 
 ## 9. 架构原则（长期遵守）
 
