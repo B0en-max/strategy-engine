@@ -1,0 +1,67 @@
+# ===========================================================================
+# Strategy Engine - .gitignore
+# 说明：数据目录只忽略“内容”，保留目录结构（用 .gitkeep 占位），
+#       这样别人克隆仓库后仍有 data/raw、data/processed、data/cache 可用。
+# ===========================================================================
+
+# --- Python 运行时产物 ---
+__pycache__/
+*.pyc
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# --- 打包 / 构建产物 ---
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- 虚拟环境 ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- 环境变量与机密（API Key 绝不入库）---
+.env
+.env.*
+!.env.example
+
+# --- 数据库文件（Stage 02 起会使用 SQLite）---
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# --- 数据目录：忽略内容，保留目录结构 ---
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/cache/*
+!data/cache/.gitkeep
+
+# --- 日志：忽略内容，保留目录结构 ---
+logs/*
+!logs/.gitkeep
+*.log
+
+# --- 测试 / 类型检查 / 代码质量缓存 ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# --- 编辑器与操作系统 ---
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+Desktop.ini
