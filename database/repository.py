@@ -15,6 +15,10 @@
     repo.create_test_table()          # 仅用于验证，不是业务表
     repo.execute("INSERT INTO ...", (1,))
     rows = repo.query_all("SELECT * FROM ...")
+
+跨 Repository 的原子写入（例如执行器）：
+    with unit_of_work(order_repo, trade_repo, position_repo):
+        ...   # 要么全部提交，要么全部回滚
 """
 
 from __future__ import annotations
@@ -51,6 +55,8 @@ class Repository:
     def __init__(self, db_path: PathInput = None) -> None:
         # 只保存路径；连接在使用时创建，避免全局长期连接
         self._db_path: Path = database.resolve_database_path(db_path)
+        # 仅在 unit_of_work() 期间非空：此时所有操作复用同一个连接与事务
+        self._bound_connection: sqlite3.Connection | None = None
 
     # ------------------------------------------------------------------ 属性
     @property
@@ -63,10 +69,39 @@ class Repository:
         """初始化数据库（幂等），返回数据库文件路径。"""
         return database.initialize_database(self._db_path)
 
+    def _bind(self, conn: sqlite3.Connection) -> None:
+        """把本 Repository 绑定到外部事务的连接（仅供 unit_of_work 使用）。"""
+        self._bound_connection = conn
+
+    def _unbind(self) -> None:
+        """解除绑定，恢复“每次操作自建连接”的默认行为。"""
+        self._bound_connection = None
+
+    @contextmanager
+    def _acquire(self) -> Iterator[sqlite3.Connection]:
+        """获取一个可用连接：已绑定时复用它，否则临时新建（用完即关）。"""
+        if self._bound_connection is not None:
+            yield self._bound_connection
+            return
+        with database.connection(self._db_path) as conn:
+            yield conn
+
+    @contextmanager
+    def _atomic(self, conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+        """在给定连接上开启事务；若已处于 unit_of_work 事务中则直接复用。"""
+        if self._bound_connection is not None:
+            yield conn
+            return
+        with database.transaction(conn):
+            yield conn
+
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
-        """打开一个连接，正常结束提交、异常回滚、最终关闭。"""
-        with database.connection(self._db_path) as conn:
+        """打开一个连接，正常结束提交、异常回滚、最终关闭。
+
+        在 unit_of_work() 中则复用同一个连接（由外层负责提交/回滚/关闭）。
+        """
+        with self._acquire() as conn:
             yield conn
 
     @contextmanager
@@ -77,9 +112,11 @@ class Repository:
             with repo.transaction() as conn:
                 conn.execute("INSERT INTO ...")
                 conn.execute("INSERT INTO ...")
+
+        在 unit_of_work() 中不会重复开启事务，而是复用外层事务。
         """
-        with database.connection(self._db_path) as conn:
-            with database.transaction(conn):
+        with self._acquire() as conn:
+            with self._atomic(conn):
                 yield conn
 
     def close(self) -> None:
@@ -91,7 +128,7 @@ class Repository:
 
         单条语句在自己的连接上立即生效（autocommit）。
         """
-        with database.connection(self._db_path) as conn:
+        with self._acquire() as conn:
             try:
                 cursor = conn.execute(sql, () if params is None else params)
                 return cursor.rowcount
@@ -108,8 +145,8 @@ class Repository:
         整个批次在一个事务内完成：任何一条失败都会整体回滚。
         """
         rows = list(seq_of_params)
-        with database.connection(self._db_path) as conn:
-            with database.transaction(conn):
+        with self._acquire() as conn:
+            with self._atomic(conn):
                 try:
                     cursor = conn.executemany(sql, rows)
                     affected = cursor.rowcount
@@ -128,7 +165,7 @@ class Repository:
         return self._fetch(sql, params, many=True)
 
     def _fetch(self, sql: str, params: SqlParams | None, *, many: bool) -> Any:
-        with database.connection(self._db_path) as conn:
+        with self._acquire() as conn:
             try:
                 cursor = conn.execute(sql, () if params is None else params)
             except sqlite3.Error as exc:
@@ -151,3 +188,50 @@ class Repository:
             "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
         )
         return [row["name"] for row in rows]
+
+
+@contextmanager
+def unit_of_work(*repositories: Repository) -> Iterator[sqlite3.Connection]:
+    """把多个 Repository 的写操作绑定到**同一个连接与事务**（跨 Repository 原子性）。
+
+    用途：当一个业务流程需要跨多张表写入（例如 执行器：Order → Trade → Position），
+    必须保证“要么全部成功、要么全部回滚”，不能留下半完成状态。
+
+    用法：
+        with unit_of_work(order_repo, trade_repo, position_repo):
+            order_repo.create_order(...)    # 不再各自提交
+            trade_repo.create_trade(...)
+            position_repo.update_position(...)   # 全部成功才一起提交
+
+    行为：
+        - 正常结束：一次性 COMMIT
+        - 出现异常：ROLLBACK 并把异常继续抛出（不吞异常）
+        - 结束后解除绑定并关闭连接，各 Repository 恢复默认行为
+    """
+    if not repositories:
+        raise ValueError("unit_of_work 至少需要一个 Repository")
+
+    db_paths = {repo.db_path for repo in repositories}
+    if len(db_paths) > 1:
+        raise ValueError(f"unit_of_work 中的 Repository 必须指向同一个数据库: {db_paths}")
+    if any(repo._bound_connection is not None for repo in repositories):
+        raise ValueError("Repository 已经在一个 unit_of_work 中，不支持嵌套")
+
+    conn = database.connect(repositories[0].db_path)
+    try:
+        conn.execute("BEGIN")
+        for repo in repositories:
+            repo._bind(conn)
+        try:
+            yield conn
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        else:
+            if conn.in_transaction:
+                conn.execute("COMMIT")
+    finally:
+        for repo in repositories:
+            repo._unbind()
+        conn.close()

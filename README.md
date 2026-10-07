@@ -24,22 +24,32 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 
 ## 3. 当前开发阶段
 
-**Stage 09 — 订单（Order）数据层**
+**Stage 10 — 模拟执行器（Execution Engine）基础层**
 
-已建立订单表 `orders` 与 `OrderRepository`：
+已建立 `execution/engine.py`，把数据层串成固定执行链：
 
-- **定位**：订单是**准备执行 / 提交给执行器的意图**，不是成交（trades），也不是持仓（positions）
-- **枚举约束**：`side`（buy/sell）、`order_type`（market/limit）、`status`
-  （pending/submitted/filled/cancelled/rejected）全部由数据库 CHECK 限定
-- **可空字段**：`signal_id` 可为空（手工下单）、`price` 可为空（市价单）
-- 本阶段**不会**自动创建订单、自动成交、修改 Position 或生成 Trade
+```
+Signal → Order → Trade → Position
+```
+
+- `ExecutionEngine.execute_signal(signal_id, quantity, *, price=None, fee=0.0, timestamp=None)`
+- side 由 Signal 的 direction 决定（`long → buy`、`short → sell`）；数量由调用方给出
+- 执行流程：建单（`submitted`）→ 模拟市价成交 → 写 Trade → 订单置 `filled`
+  → 按成交更新 Position → Signal 置 `executed`
+- **原子性**：整条链在**同一个事务**里完成（`database.unit_of_work()`），
+  任何一步失败都整体回滚，不会留下半完成状态
+- 持仓规则：加仓/建仓加权平均；减仓时剩余持仓平均成本不变；反手以本次成交价为准；
+  清仓归零。**不计算盈亏**，不处理资金账户、杠杆、手续费结算
+- 执行器只用现有 Repository，**内部不写 SQL**；不做市场判断
+
+**未接入**：实时行情、OKX / 券商 API、实盘交易、回测、AI、前端。本阶段仅为**模拟执行**。
 
 > **时间语义（全局约定）**：所有时间戳为 **UTC**，格式 `YYYY-MM-DD HH:MM:SS`；
 > `klines.timestamp` = K 线开始时间；`signals.timestamp` = 信号发生时间；
-> `trades.timestamp` = 成交发生时间；`orders.created_at` = 订单创建时间（时间范围筛选针对它）。
+> `trades.timestamp` = 成交发生时间；`orders.created_at` = 订单创建时间。
 
-（Stage 01 骨架；Stage 02 SQLite 连接/事务/最小数据访问层；Stage 03 symbols；
-Stage 04 klines；Stage 05 strategies；Stage 06 signals；Stage 07 trades；Stage 08 positions。）
+（Stage 01 骨架；02 SQLite 基础；03 symbols；04 klines；05 strategies；06 signals；
+07 trades；08 positions；09 orders。）
 
 ## 4. 总体模块（规划）
 
@@ -52,7 +62,7 @@ Stage 04 klines；Stage 05 strategies；Stage 06 signals；Stage 07 trades；Sta
 | `data/cache/` | 可重建的缓存（不入库） | 仅目录 |
 | `strategies/` | 策略实现（版本化：v1 / v2 / v3 …） | 目录为空；策略定义与版本记录已在数据库层建立，策略逻辑尚未实现 |
 | `backtest/` | 回测引擎（严格按时间顺序，禁止未来数据泄漏） | 空包，仅占位 |
-| `execution/` | 执行层（只机械执行已批准的信号，不自己判断市场） | 空包，仅占位 |
+| `execution/` | 执行层（只机械执行已批准的信号，不自己判断市场） | **模拟执行器已实现**（`execution/engine.py`），无实盘 |
 | `review/` | 交易记录与复盘 | 空包，仅占位 |
 | `optimization/` | 参数寻优、防过拟合验证（Train/Validation/Test/Walk-forward） | 空包，仅占位 |
 | `api/` | 对外 API，供 AI 工作台 / MCP 调用 | 空包，仅占位 |
@@ -62,6 +72,7 @@ Stage 04 klines；Stage 05 strategies；Stage 06 signals；Stage 07 trades；Sta
 
 > 风控（Risk Manager）在架构上是独立模块，Strategy 不得绕过它；
 > 它会在后续阶段以独立目录/模块的形式加入，**当前尚未实现**。
+> 模拟执行器目前直接执行 Signal，**尚未接入风控检查**。
 
 ## 5. 数据库结构
 
@@ -251,30 +262,37 @@ Stage 04 klines；Stage 05 strategies；Stage 06 signals；Stage 07 trades；Sta
 - [x] `database/__init__.py`：对外导出 `OrderRepository`
 - [x] `tests/test_orders.py`：26 个测试（建表与约束、创建/查询、market/limit、状态更新、外键、筛选与计数、持久化）
 
+### Stage 10 — 模拟执行器（Execution Engine）
+
+- [x] `execution/engine.py`：`ExecutionEngine.execute_signal()`，固定链路 Signal → Order → Trade → Position
+- [x] `execution/engine.py`：`apply_trade_to_position()` 纯函数（建仓/加仓/减仓/清仓/反手）
+- [x] `database/repository.py`：新增 `unit_of_work(*repositories)`，把多个 Repository 绑定到同一事务（跨表原子写入）
+- [x] `execution/__init__.py`：导出 `ExecutionEngine` / `ExecutionResult` / `apply_trade_to_position`
+- [x] `tests/test_execution.py`：18 个测试（完整链路、加仓/减仓/清仓/反手、订单状态、成交记录、
+  持仓更新、前置校验、失败整体回滚、纯函数规则、临时库隔离）
+
 #### 当前已支持
 
 - `symbols` 标的
 - `klines` K 线（OHLCV）
-- `strategies` 策略定义
-- **strategy version**（每个版本独立记录）
-- **strategy config**（JSON 文本）
-- **strategy status**（draft / testing / active / retired）
-- `signals` 交易信号（含策略 / 标的引用、long / short、pending / executed / cancelled）
-- `trades` 实际成交记录（buy / sell、可关联 Signal 或手工交易）
-- `positions` 当前持仓（每个 symbol 一条）
-- `orders` 订单（market / limit、五种状态、可关联 Signal 或手工下单）
+- `strategies` 策略定义（含 version / config / status）
+- `signals` 交易信号
+- `trades` 实际成交记录
+- `positions` 当前持仓
+- `orders` 订单（market / limit、五种状态）
+- **模拟执行器**：Signal → Order → Trade → Position 全链路，单事务原子、失败整体回滚
 
 #### 当前仍未实现
 
-执行器、盈亏计算（PnL）、复盘、策略修改、回测、真实行情数据源、实盘交易、AI、API、MCP
-（也尚无信号生成逻辑；持仓不会根据 trades 自动推算；订单不会自动成交或生成成交记录：
-Stage 05~09 建立的都是**数据层**）。
+真实行情数据源、实时行情、实盘交易（OKX / 券商 API）、回测、盈亏计算（PnL）、
+复盘、策略逻辑与信号生成、策略修改、风控（Risk Manager）、AI、API、MCP、前端。
 
 ## 7. 后续阶段会逐步加入的内容（均尚未实现）
 
-- 阶段 10 起：真实行情数据接入（数据采集 / 数据清洗 / 原始数据入库）—— 当前未接入任何外部行情源
+- 阶段 11 起：真实行情数据接入（数据采集 / 数据清洗 / 原始数据入库）—— 当前未接入任何外部行情源
 - 策略逻辑实现与信号生成（Stage 05 / 06 只建立了策略定义与信号数据层，尚无生成逻辑）
-- 执行器：根据 Order 实际执行并生成 Trade / 更新 Position（当前只有数据层）
+- 风控（Risk Manager）：独立于策略放行信号（当前执行器不做风控判断）
+- 盈亏计算、复盘、回测、参数优化
 - 回测引擎
 - 风控（Risk Manager，独立于策略）
 - 模拟执行 / Paper Trading

@@ -7,6 +7,7 @@
     connection()            连接上下文：提交 / 回滚 / 自动关闭
     transaction()           在已有连接上开启显式事务
     Repository              最小数据访问层
+    unit_of_work()          把多个 Repository 绑定到同一个事务（跨表原子写入）
     SymbolRepository        标的基础数据访问层（symbols 表）
     KlineRepository         K 线数据访问层（klines 表）
     StrategyRepository     策略定义与版本的数据访问层（strategies 表）
@@ -42,7 +43,7 @@ from .database import (
 from .kline_repository import KlineRepository
 from .order_repository import OrderRepository
 from .position_repository import PositionRepository
-from .repository import Repository
+from .repository import Repository, unit_of_work
 from .signal_repository import SignalRepository
 from .strategy_repository import StrategyRepository
 from .symbol_repository import SymbolRepository
@@ -70,4 +71,5 @@ __all__ = [
     "initialize_database",
     "resolve_database_path",
     "transaction",
+    "unit_of_work",
 ]
