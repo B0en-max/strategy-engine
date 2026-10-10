@@ -73,8 +73,8 @@ class LimitRatioTest(unittest.TestCase):
             self.assertIn(board, basis)
 
     def test_st_ratios(self) -> None:
-        self.assertEqual(resolve_limit_ratio(SSE_MAIN, is_st=True)[0], Decimal("0.05"))
-        self.assertEqual(resolve_limit_ratio(SZSE_MAIN, is_st=True)[0], Decimal("0.05"))
+        self.assertEqual(resolve_limit_ratio(SSE_MAIN, is_st=True, as_of="2026-01-01")[0], Decimal("0.05"))
+        self.assertEqual(resolve_limit_ratio(SZSE_MAIN, is_st=True, as_of="2026-01-01")[0], Decimal("0.05"))
         # 创业板 ST 仍是 20%（制度）
         self.assertEqual(resolve_limit_ratio(SZSE_GEM, is_st=True)[0], Decimal("0.20"))
 
@@ -88,11 +88,12 @@ class LimitRatioTest(unittest.TestCase):
         # 5 个板块都必须能给出常规与 ST 两套比例，不得出现“板块存在但 ST 无比例”的隐式缺口
         for board in BOARD_LIMIT_RATIOS:
             self.assertIsNotNone(resolve_limit_ratio(board)[0], board)
-            self.assertIsNotNone(resolve_limit_ratio(board, is_st=True)[0], f"{board} ST")
+            self.assertIsNotNone(resolve_limit_ratio(board, is_st=True, as_of="2026-01-01")[0],
+                                 f"{board} ST")
 
     def test_main_board_st_ratio_differs_from_star(self) -> None:
         # 主板 ST 5% vs 科创板 ST 20%，不得混用同一张表（历史上曾把科创板 ST 误判为 unknown）
-        self.assertEqual(resolve_limit_ratio(SZSE_MAIN, is_st=True)[0], Decimal("0.05"))
+        self.assertEqual(resolve_limit_ratio(SZSE_MAIN, is_st=True, as_of="2026-01-01")[0], Decimal("0.05"))
         self.assertEqual(resolve_limit_ratio(SSE_STAR, is_st=True)[0], Decimal("0.20"))
 
     def test_unknown_board_is_not_guessed(self) -> None:
@@ -122,7 +123,8 @@ class LimitPriceTest(unittest.TestCase):
         self.assertEqual(compute_limit_prices("24.11", board=SZSE_GEM, prev_close_is_exchange_reference=True).upper, Decimal("28.93"))
 
     def test_st_main_board_5_percent(self) -> None:
-        result = compute_limit_prices("10.00", board=SSE_MAIN, is_st=True, prev_close_is_exchange_reference=True)
+        result = compute_limit_prices("10.00", board=SSE_MAIN, is_st=True, as_of="2026-01-01",
+                                      prev_close_is_exchange_reference=True)
         self.assertEqual(result.upper, Decimal("10.50"))
         self.assertEqual(result.lower, Decimal("9.50"))
 
@@ -423,9 +425,9 @@ class RuleBasisAuditTest(unittest.TestCase):
     """
 
     def test_st_ratio_mapping_matches_documented_clause(self) -> None:
-        # 主板风险警示 5%、创业板风险警示 20%（与条款逐项对齐）
-        self.assertEqual(resolve_limit_ratio(SSE_MAIN, is_st=True)[0], Decimal("0.05"))
-        self.assertEqual(resolve_limit_ratio(SZSE_MAIN, is_st=True)[0], Decimal("0.05"))
+        # 主板风险警示（2026-07-06 之前）5%、创业板风险警示 20%（与条款逐项对齐）
+        self.assertEqual(resolve_limit_ratio(SSE_MAIN, is_st=True, as_of="2026-01-01")[0], Decimal("0.05"))
+        self.assertEqual(resolve_limit_ratio(SZSE_MAIN, is_st=True, as_of="2026-01-01")[0], Decimal("0.05"))
         self.assertEqual(resolve_limit_ratio(SZSE_GEM, is_st=True)[0], Decimal("0.20"))
 
     def test_resume_never_auto_gains_no_limit(self) -> None:
@@ -444,6 +446,42 @@ class RuleBasisAuditTest(unittest.TestCase):
             self.assertIsNone(result.upper)
         self.assertEqual(LIMIT_STAGES, (LISTING_STAGE_TRADING, LISTING_STAGE_NO_LIMIT,
                                         LISTING_STAGE_MAIN_FIRST_DAY))
+
+
+class MainBoardStRatioVersionTest(unittest.TestCase):
+    """D7：主板风险警示比例自 2026-07-06 起由 5% 调整为 10%（上交所现行原文）；必须给日期。"""
+
+    def test_boundary_around_2026_07_06_sse(self) -> None:
+        self.assertEqual(resolve_limit_ratio(SSE_MAIN, is_st=True, as_of="2026-07-05")[0], Decimal("0.05"))
+        self.assertEqual(resolve_limit_ratio(SSE_MAIN, is_st=True, as_of="2026-07-06")[0], Decimal("0.10"))
+        self.assertEqual(resolve_limit_ratio(SSE_MAIN, is_st=True, as_of="2026-09-30")[0], Decimal("0.10"))
+
+    def test_no_date_is_fail_closed_for_main_board_st(self) -> None:
+        for board in (SSE_MAIN, SZSE_MAIN):
+            ratio, basis = resolve_limit_ratio(board, is_st=True)
+            self.assertIsNone(ratio, board)
+            self.assertTrue(basis)
+            result = compute_limit_prices("10.00", board=board, is_st=True,
+                                          prev_close_is_exchange_reference=True)
+            self.assertEqual(result.status, STATUS_UNKNOWN, board)
+            self.assertIsNone(result.upper)
+
+    def test_szse_current_text_not_obtained_is_unknown_after_change(self) -> None:
+        # 深交所现行原文未取得 → 不得用上交所规则/行情替代
+        self.assertIsNone(resolve_limit_ratio(SZSE_MAIN, is_st=True, as_of="2026-07-06")[0])
+        # 变化之前仍为 5%（历史证据 + 现行行情一致）
+        self.assertEqual(resolve_limit_ratio(SZSE_MAIN, is_st=True, as_of="2026-01-01")[0], Decimal("0.05"))
+
+    def test_prices_after_change_sse(self) -> None:
+        result = compute_limit_prices("10.00", board=SSE_MAIN, is_st=True, as_of="2026-07-06",
+                                      prev_close_is_exchange_reference=True)
+        self.assertEqual(result.status, STATUS_OK)
+        self.assertEqual(result.upper, Decimal("11.00"))
+        self.assertEqual(result.lower, Decimal("9.00"))
+
+    def test_non_main_board_st_unaffected_by_as_of(self) -> None:
+        self.assertEqual(resolve_limit_ratio(SZSE_GEM, is_st=True)[0], Decimal("0.20"))
+        self.assertEqual(resolve_limit_ratio(SSE_STAR, is_st=True, as_of="2026-09-30")[0], Decimal("0.20"))
 
 
 if __name__ == "__main__":

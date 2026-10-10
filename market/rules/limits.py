@@ -109,6 +109,16 @@ MAIN_BOARD_REGISTRATION_FIRST_LISTING_DATE: Final[str] = "2023-04-10"
 #: 创业板 / 科创板 / 主板（注册制）新股"上市后前 N 个交易日"无涨跌幅限制
 NO_LIMIT_SESSIONS: Final[int] = 5
 
+#: 主板风险警示股票涨跌幅比例：自 2026-07-06 起由 5% 调整为 10%。
+#: 【规则依据·现行 official（沪）】上交所《交易规则（2026年修订）》：通知明确“自2026年7月6日起施行”，
+#:   起草说明“将主板风险警示股票价格涨跌幅限制比例由5%调整为10%，与主板其他股票保持一致”；
+#:   该调整**不在**暂缓实施清单（附件3，仅涉大宗交易）内。正式库行情也精确在 2026-07 出现 5%→10% 切换。
+#:【深交所】现行《交易规则》原文未取得（仅 2021/2023 版为历史证据）→ 2026-07-06 之后返回 unknown，
+#:   不以上交所规则或行情样本替代。
+MAIN_BOARD_ST_RATIO_EFFECTIVE_DATE: Final[str] = "2026-07-06"
+MAIN_BOARD_ST_RATIO_BEFORE: Final[Decimal] = Decimal("0.05")
+MAIN_BOARD_ST_RATIO_SSE_AFTER: Final[Decimal] = Decimal("0.10")
+
 BASIS_NO_LIMIT_NEW_LISTING: Final[str] = "新上市无涨跌幅限制阶段（制度）"
 
 
@@ -156,10 +166,41 @@ def round_to_tick(value: Decimal, tick: Decimal = DEFAULT_TICK) -> Decimal:
     return (value / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
 
 
-def resolve_limit_ratio(board: str | None, *, is_st: bool = False) -> tuple[Decimal | None, str]:
-    """返回 (涨跌幅比例, 依据说明)；无法确定时比例为 None。"""
+def _resolve_main_board_st_ratio(board: str, as_of: str | None) -> tuple[Decimal | None, str]:
+    """沪深主板风险警示比例：2026-07-06 起由 5% 调整为 10%；**不给日期则 unknown**（fail-closed）。"""
+    if as_of is None:
+        return None, (
+            f"{board} 主板风险警示股票比例在 {MAIN_BOARD_ST_RATIO_EFFECTIVE_DATE} 前后不同（5% → 10%），"
+            "必须提供 as_of 日期（不猜）"
+        )
+    day = str(as_of)[:10]
+    if day < MAIN_BOARD_ST_RATIO_EFFECTIVE_DATE:
+        return MAIN_BOARD_ST_RATIO_BEFORE, (
+            f"{board} 主板风险警示股票 {MAIN_BOARD_ST_RATIO_BEFORE}"
+            f"（{MAIN_BOARD_ST_RATIO_EFFECTIVE_DATE} 之前）"
+        )
+    if board == SSE_MAIN:
+        return MAIN_BOARD_ST_RATIO_SSE_AFTER, (
+            f"{SSE_MAIN} 主板风险警示股票 {MAIN_BOARD_ST_RATIO_SSE_AFTER}"
+            f"（上交所《交易规则（2026年修订）》自 {MAIN_BOARD_ST_RATIO_EFFECTIVE_DATE} 施行）"
+        )
+    return None, (
+        f"{SZSE_MAIN} 主板风险警示股票比例：深交所现行《交易规则》原文未取得"
+        "（沪深同步调整、深市行情佐证为 10%），不得据此替代 → unknown"
+    )
+
+
+def resolve_limit_ratio(board: str | None, *, is_st: bool = False,
+                        as_of: str | None = None) -> tuple[Decimal | None, str]:
+    """返回 (涨跌幅比例, 依据说明)；无法确定时比例为 None。
+
+    as_of：判定日期（YYYY-MM-DD）。**沪深主板 ST** 的比例在 2026-07-06 前后不同，
+    因此该组合必须给出 as_of，否则返回 unknown（fail-closed）；其余板块不受影响。
+    """
     if not board:
         return None, "板块未知：不猜测，需由调用方给出（可用 market.data.boards.classify_board）"
+    if is_st and board in (SSE_MAIN, SZSE_MAIN):
+        return _resolve_main_board_st_ratio(board, as_of)
     table = ST_LIMIT_RATIOS if is_st else BOARD_LIMIT_RATIOS
     ratio = table.get(board)
     if ratio is None:
@@ -260,6 +301,7 @@ def compute_limit_prices(
     board: str | None,
     is_st: bool = False,
     listing_stage: str = LISTING_STAGE_TRADING,
+    as_of: str | None = None,
     prev_close_is_exchange_reference: bool | None = None,
     tick: Decimal = DEFAULT_TICK,
 ) -> LimitPriceResult:
@@ -291,7 +333,7 @@ def compute_limit_prices(
     if listing_stage != LISTING_STAGE_TRADING:
         return LimitPriceResult(STATUS_UNKNOWN, None, None, None, f"未知的上市阶段：{listing_stage}")
 
-    ratio, basis = resolve_limit_ratio(board, is_st=is_st)
+    ratio, basis = resolve_limit_ratio(board, is_st=is_st, as_of=as_of)
     if ratio is None:
         return LimitPriceResult(STATUS_UNKNOWN, None, None, None, basis)
 
