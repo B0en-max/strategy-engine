@@ -47,6 +47,28 @@ DEFAULT_STRATEGIES: dict[str, type[Strategy]] = {
 }
 
 
+def strategy_type_of(config: Mapping[str, Any]) -> str:
+    """读取 config['type']（缺省用默认类型），非法时抛 ValueError。"""
+    type_name = config.get(STRATEGY_TYPE_KEY, DEFAULT_STRATEGY_TYPE)
+    if not isinstance(type_name, str) or not type_name.strip():
+        raise ValueError(
+            f"config[{STRATEGY_TYPE_KEY!r}] 必须是非空字符串，实际为 {type_name!r}"
+        )
+    return type_name.strip()
+
+
+def build_strategy(
+    config: Mapping[str, Any],
+    registry: Mapping[str, type[Strategy]],
+) -> Strategy:
+    """按 config['type'] 从注册表构造策略实例（StrategyRunner 与 StrategyExecutor 共用）。"""
+    type_name = strategy_type_of(config)
+    strategy_class = registry.get(type_name)
+    if strategy_class is None:
+        raise ValueError(f"未知策略类型 {type_name!r}，已注册: {sorted(registry)}")
+    return strategy_class.from_config(config)
+
+
 @dataclass(frozen=True)
 class RunResult:
     """一次策略运行的结果（只读汇总）。"""
@@ -102,18 +124,7 @@ class StrategyRunner:
     # ------------------------------------------------------------------ 准备
     def resolve_strategy(self, config: Mapping[str, Any]) -> Strategy:
         """根据 strategies.config 选择并构造策略实例。"""
-        type_name = config.get(STRATEGY_TYPE_KEY, DEFAULT_STRATEGY_TYPE)
-        if not isinstance(type_name, str) or not type_name.strip():
-            raise ValueError(
-                f"config[{STRATEGY_TYPE_KEY!r}] 必须是非空字符串，实际为 {type_name!r}"
-            )
-        type_name = type_name.strip()
-        strategy_class = self._registry.get(type_name)
-        if strategy_class is None:
-            raise ValueError(
-                f"未知策略类型 {type_name!r}，已注册: {list(self.available_strategy_types)}"
-            )
-        return strategy_class.from_config(config)
+        return build_strategy(config, self._registry)
 
     def load_bars(
         self,

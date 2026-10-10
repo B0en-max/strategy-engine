@@ -30,14 +30,16 @@ import sqlite3
 from typing import Any, Mapping
 
 from . import models
-from .repository import Repository, enrich_error
+from .repository import Repository, enrich_error, unit_of_work
+from .strategy_definition_repository import StrategyDefinitionRepository
+from .validation import require_positive_int
 
 STRATEGIES = models.STRATEGIES_TABLE
 
 _INSERT_SQL = (
     f"INSERT INTO {STRATEGIES} "
-    "(name, description, status, version, config, created_at, updated_at) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?)"
+    "(name, description, status, version, config, strategy_id, created_at, updated_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 # 稳定排序：created_at 有秒级精度，可能相同，用 id 作为次级排序键保证结果稳定
@@ -133,26 +135,127 @@ class StrategyRepository(Repository):
         description: str | None = None,
         status: str = models.DEFAULT_STRATEGY_STATUS,
         version: int = models.DEFAULT_STRATEGY_VERSION,
+        strategy_id: int | None = None,
     ) -> int:
         """严格创建一个策略版本，返回新记录 id。
 
         - (name, version) 已存在时抛出 sqlite3.IntegrityError，**不覆盖旧版本**
         - config 必须是 dict；写入前会被 json.dumps 成 JSON 字符串
+        - strategy_id（Stage 19）：该版本属于哪个 Strategy（strategy_definitions.id）；
+          不传时按 name 自动 ensure 一个 Strategy 身份（老调用方式保持可用，
+          新代码推荐用 create_version() 显式指定 Strategy）
         """
         name = _require_name(name)
         description = _require_description(description)
         status = _require_status(status)
         version = _require_version(version)
         config_json = dump_config(config)
+        if strategy_id is not None:
+            strategy_id = require_positive_int(strategy_id, "strategy_id")
 
+        definitions = StrategyDefinitionRepository(self.db_path)
         now = models.utc_now_str()
-        params = (name, description, status, version, config_json, now, now)
-        with self.transaction() as conn:
-            try:
-                cursor = conn.execute(_INSERT_SQL, params)
-            except sqlite3.Error as exc:
-                raise enrich_error(exc, _INSERT_SQL, params) from exc
-            return int(cursor.lastrowid)
+
+        # Strategy 身份 + 版本在同一个事务里写入：要么都成立，要么都不写
+        with unit_of_work(self, definitions):
+            resolved_strategy_id = (
+                definitions.ensure_definition(name, description=description)
+                if strategy_id is None
+                else strategy_id
+            )
+            params = (
+                name,
+                description,
+                status,
+                version,
+                config_json,
+                resolved_strategy_id,
+                now,
+                now,
+            )
+            with self.transaction() as conn:
+                try:
+                    cursor = conn.execute(_INSERT_SQL, params)
+                except sqlite3.Error as exc:
+                    raise enrich_error(exc, _INSERT_SQL, params) from exc
+                return int(cursor.lastrowid)
+
+    # ------------------------------------------------------------------ 版本
+    def next_version(self, strategy_id: int) -> int:
+        """该 Strategy 的下一个版本号（还没有版本时从 1 开始）。"""
+        strategy_id = require_positive_int(strategy_id, "strategy_id")
+        row = self.query_one(
+            f"SELECT COALESCE(MAX(version), 0) + 1 AS next FROM {STRATEGIES} "
+            "WHERE strategy_id = ?",
+            (strategy_id,),
+        )
+        return int(row["next"]) if row is not None else 1
+
+    def create_version(
+        self,
+        strategy_id: int,
+        config: Mapping[str, Any],
+        *,
+        version: int | None = None,
+        status: str = models.DEFAULT_STRATEGY_STATUS,
+        description: str | None = None,
+    ) -> int:
+        """给指定 Strategy 新建一个版本，返回版本记录 id（signals.strategy_id 指向它）。
+
+        - strategy_id 指向 strategy_definitions（Strategy 身份）；不存在时抛 ValueError
+        - version 不传时自动取「当前最大版本 + 1」
+        - name / description 继承 Strategy 身份（版本与策略保持同名，避免两处各写一份）
+        - (name, version) 已存在时抛 sqlite3.IntegrityError，**不覆盖旧版本**
+        """
+        strategy_id = require_positive_int(strategy_id, "strategy_id")
+        definition = StrategyDefinitionRepository(self.db_path).get_definition(strategy_id)
+        if definition is None:
+            raise ValueError(f"策略不存在: {strategy_id}")
+
+        resolved_version = (
+            self.next_version(strategy_id) if version is None else _require_version(version)
+        )
+        resolved_description = (
+            definition["description"] if description is None else description
+        )
+        return self.create_strategy(
+            definition["name"],
+            config,
+            description=resolved_description,
+            status=status,
+            version=resolved_version,
+            strategy_id=strategy_id,
+        )
+
+    def get_version(self, version_id: int) -> dict[str, Any] | None:
+        """按版本记录 id 查询版本（等价于 get_strategy，名字更贴近语义）。"""
+        return self.get_strategy(version_id)
+
+    def get_version_by_number(self, strategy_id: int, version: int) -> dict[str, Any] | None:
+        """按 (Strategy 身份, 版本号) 查询版本；不存在时返回 None。"""
+        strategy_id = require_positive_int(strategy_id, "strategy_id")
+        version = _require_version(version)
+        row = self.query_one(
+            f"SELECT * FROM {STRATEGIES} WHERE strategy_id = ? AND version = ?",
+            (strategy_id, version),
+        )
+        return _row_to_strategy(row) if row is not None else None
+
+    def list_versions(
+        self,
+        strategy_id: int,
+        *,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """列出某个 Strategy 的全部版本（按 version 升序，结果稳定）。"""
+        strategy_id = require_positive_int(strategy_id, "strategy_id")
+        where = "strategy_id = ?"
+        params: list[object] = [strategy_id]
+        if status is not None:
+            where += " AND status = ?"
+            params.append(_require_status(status))
+        sql = f"SELECT * FROM {STRATEGIES} WHERE {where} ORDER BY version ASC, id ASC"
+        return [_row_to_strategy(row) for row in self.query_all(sql, tuple(params))]
 
     # ------------------------------------------------------------------ 查询
     def get_strategy(self, strategy_id: int) -> dict[str, Any] | None:

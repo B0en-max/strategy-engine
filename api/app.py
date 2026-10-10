@@ -45,15 +45,17 @@ from database import (
     OrderRepository,
     PositionRepository,
     SignalRepository,
+    StrategyDefinitionRepository,
     StrategyRepository,
     SymbolRepository,
     TradeRepository,
     resolve_database_path,
 )
 from execution import ExecutionEngine
-from strategies import StrategyRunner
+from market import MarketService
+from strategies import StrategyRunner, StrategyService
 
-from .schemas import ExecuteSignalRequest, RunStrategyRequest
+from .schemas import ExecuteSignalRequest, ExecuteStrategyRequest, RunStrategyRequest
 
 API_TITLE = "Strategy Engine API"
 API_VERSION = "0.1.0"
@@ -157,6 +159,109 @@ def list_klines(
     return _rows(rows)
 
 
+# ---------------------------------------------------------------------------
+# 市场 / 选股（Stage 20 Step 2）
+#
+# 本组端点只做「参数校验 + 调用 MarketService + 转 JSON」，
+# 不在 Router 里写 SQL；行情来自 klines 现有数据，缺失一律 null（不伪造）。
+# ---------------------------------------------------------------------------
+#: /market/symbols/{id}/klines 的默认与最大 limit
+MARKET_KLINE_DEFAULT_LIMIT: Final[int] = 300
+MARKET_KLINE_MAX_LIMIT: Final[int] = 2000
+
+
+@router.get("/market/groups", summary="市场分组 / 板块列表（含板块行情聚合）")
+def list_market_groups(
+    request: Request,
+    group_type: str | None = None,
+    market: str | None = None,
+    active_only: bool = True,
+    timeframe: str = "1d",
+) -> list[dict[str, Any]]:
+    """板块列表：在成员数之外附带涨跌聚合（Stage 22 市场总览的板块 Tile 用）。
+
+    聚合在 Repository / Service 层用**一条 SQL** 完成，前端不需要再逐个板块请求股票列表。
+    """
+    return MarketService(_db_path(request)).list_groups_with_stats(
+        group_type=group_type, market=market, active_only=active_only, timeframe=timeframe
+    )
+
+
+@router.get("/market/groups/{group_id}/symbols", summary="板块 / 股票池内的标的（含最新行情）")
+def list_market_group_symbols(
+    group_id: int,
+    request: Request,
+    active_only: bool = True,
+    timeframe: str = "1d",
+) -> list[dict[str, Any]]:
+    service = MarketService(_db_path(request))
+    if service.get_group(group_id) is None:
+        raise _not_found("市场分组", group_id)
+    return service.list_market_symbols(
+        group_id=group_id, active_only=active_only, timeframe=timeframe
+    )
+
+
+@router.get("/market/symbols", summary="市场标的列表（市场选股页统一入口）")
+def list_market_symbols(
+    request: Request,
+    group_id: int | None = Query(None, gt=0, description="只取该分组内的标的"),
+    market: str | None = None,
+    active_only: bool = True,
+    timeframe: str = "1d",
+) -> list[dict[str, Any]]:
+    service = MarketService(_db_path(request))
+    if group_id is not None and service.get_group(group_id) is None:
+        raise _not_found("市场分组", group_id)
+    return service.list_market_symbols(
+        group_id=group_id, market=market, active_only=active_only, timeframe=timeframe
+    )
+
+
+@router.get("/market/symbols/{symbol_id}", summary="单个标的的当前行情")
+def get_market_symbol(
+    symbol_id: int,
+    request: Request,
+    timeframe: str = "1d",
+) -> dict[str, Any]:
+    row = MarketService(_db_path(request)).get_market_symbol(symbol_id, timeframe=timeframe)
+    if row is None:
+        raise _not_found("标的", symbol_id)
+    return row
+
+
+@router.get("/market/symbols/{symbol_id}/klines", summary="标的的历史 K 线（复用既有查询语义）")
+def list_market_symbol_klines(
+    symbol_id: int,
+    request: Request,
+    timeframe: str = "1d",
+    limit: int = Query(
+        MARKET_KLINE_DEFAULT_LIMIT,
+        ge=1,
+        le=MARKET_KLINE_MAX_LIMIT,
+        description="最多返回最近 N 根",
+    ),
+    start: str | None = None,
+    end: str | None = None,
+) -> list[dict[str, Any]]:
+    _db = _db_path(request)
+    _require_symbol(_db, symbol_id)
+    # 直接复用 KlineRepository.list_klines（排序、区间、limit 语义完全一致）
+    rows = KlineRepository(_db).list_klines(symbol_id, timeframe, start, end, limit=limit)
+    return [
+        {
+            "timestamp": row["timestamp"],
+            "open": row["open"],
+            "high": row["high"],
+            "low": row["low"],
+            "close": row["close"],
+            "volume": row["volume"],
+            "amount": row["amount"],
+        }
+        for row in rows
+    ]
+
+
 @router.get("/strategies/{strategy_id}/signals", summary="指定策略产生的信号")
 def list_strategy_signals(
     strategy_id: int,
@@ -219,6 +324,77 @@ def list_trades(
 
 
 # --------------------------------------------------------------------------- 运行
+# --------------------------------------------------------------------------- Strategy / 版本
+@router.get("/strategy-definitions", summary="Strategy 列表（策略身份）")
+def list_strategy_definitions(
+    request: Request, status: str | None = None
+) -> list[dict[str, Any]]:
+    """列出 Strategy 身份（一个策略一行，与「策略版本」分开）。"""
+    return StrategyDefinitionRepository(_db_path(request)).list_definitions(status=status)
+
+
+@router.get(
+    "/strategy-definitions/{strategy_id}/versions",
+    summary="某个 Strategy 的版本列表",
+)
+def list_strategy_versions(strategy_id: int, request: Request) -> list[dict[str, Any]]:
+    """列出某个 Strategy 的全部版本（按版本号升序，含 config）。"""
+    db_path = _db_path(request)
+    if StrategyDefinitionRepository(db_path).get_definition(strategy_id) is None:
+        raise _not_found("策略", strategy_id)
+    return StrategyRepository(db_path).list_versions(strategy_id)
+
+
+@router.get("/signals/{signal_id}/trace", summary="追溯 Signal 来自哪个策略 / 版本")
+def trace_signal(signal_id: int, request: Request) -> dict[str, Any]:
+    trace = StrategyService(_db_path(request)).trace_signal(signal_id)
+    if trace is None:
+        raise _not_found("信号", signal_id)
+    return trace
+
+
+@router.get("/trades/{trade_id}/trace", summary="追溯 Trade 来自哪个策略 / 版本")
+def trace_trade(trade_id: int, request: Request) -> dict[str, Any]:
+    trace = StrategyService(_db_path(request)).trace_trade(trade_id)
+    if trace is None:
+        raise _not_found("成交", trade_id)
+    return trace
+
+
+# --------------------------------------------------------------------------- 运行
+@router.post("/executor/run", summary="按指定策略版本执行一段 K 线（Executor 调用入口）")
+def run_executor(payload: ExecuteStrategyRequest, request: Request) -> dict[str, Any]:
+    """按「策略 + 版本 + 标的 + 周期 + 时间范围」执行，返回执行结果汇总。
+
+    默认在临时运行库里执行（正式库只读）：不污染正式库的历史信号 / 成交。
+    """
+    db_path = _db_path(request)
+    service = StrategyService(db_path)
+    if service.get_strategy(payload.strategy_id) is None:
+        raise _not_found("策略", payload.strategy_id)
+    version = service.get_version(payload.strategy_version_id)
+    if version is None:
+        raise _not_found("策略版本", payload.strategy_version_id)
+    if version["strategy_id"] != payload.strategy_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"策略版本 {payload.strategy_version_id} 不属于策略 {payload.strategy_id}"
+            ),
+        )
+    _require_symbol(db_path, payload.symbol_id)
+
+    result = service.run_strategy(
+        payload.strategy_id,
+        payload.strategy_version_id,
+        payload.symbol_id,
+        payload.timeframe,
+        start_timestamp=payload.start_timestamp,
+        end_timestamp=payload.end_timestamp,
+    )
+    return _plain(result)
+
+
 @router.post("/strategies/{strategy_id}/run", summary="运行策略（产生信号）")
 def run_strategy(
     strategy_id: int,

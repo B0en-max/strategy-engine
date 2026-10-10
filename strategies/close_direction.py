@@ -19,13 +19,13 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Mapping, Sequence
+from typing import Any, ClassVar, Mapping
 
-from .base import Bar, SignalCandidate, Strategy
+from .base import BarWindow, SignalCandidate, Strategy
 
 
 class CloseDirectionStrategy(Strategy):
-    """按相邻收盘价方向产生 long / short 信号。"""
+    """按相邻收盘价方向产生 long / short 信号（Stage 19 起实现增量接口 on_bar）。"""
 
     name: ClassVar[str] = "close_direction"
 
@@ -47,28 +47,28 @@ class CloseDirectionStrategy(Strategy):
             raise ValueError(f"config.min_move 必须是数字，实际为 {raw!r}")
         return cls(min_move=float(raw))
 
-    def generate(self, bars: Sequence[Bar], config: Mapping[str, Any]) -> list[SignalCandidate]:
-        """按时间顺序比较相邻收盘价，产出候选信号。"""
-        signals: list[SignalCandidate] = []
-        for previous, current in zip(bars, bars[1:]):
-            if current.close > previous.close:
-                direction = "long"
-            elif current.close < previous.close:
-                direction = "short"
-            else:
-                continue  # 相等：不产生信号
+    def on_bar(self, window: BarWindow, config: Mapping[str, Any]) -> SignalCandidate | None:
+        """比较当前 K 线与上一根 K 线的收盘价（只看已发生的两根，不接触未来数据）。"""
+        previous = window.previous()
+        if previous is None:
+            return None  # 第一根没有可比对象
 
-            if self._min_move > 0 and previous.close != 0:
-                move = abs(current.close - previous.close) / abs(previous.close)
-                if move < self._min_move:
-                    continue
+        current = window.current
+        if current.close > previous.close:
+            direction = "long"
+        elif current.close < previous.close:
+            direction = "short"
+        else:
+            return None  # 相等：不产生信号
 
-            signals.append(
-                SignalCandidate(
-                    timestamp=current.timestamp,
-                    direction=direction,
-                    price=current.close,
-                    reason=f"close {previous.close} -> {current.close}",
-                )
-            )
-        return signals
+        if self._min_move > 0 and previous.close != 0:
+            move = abs(current.close - previous.close) / abs(previous.close)
+            if move < self._min_move:
+                return None
+
+        return SignalCandidate(
+            timestamp=current.timestamp,
+            direction=direction,
+            price=current.close,
+            reason=f"close {previous.close} -> {current.close}",
+        )

@@ -28,7 +28,11 @@ from datetime import datetime, timezone
 from typing import Final
 
 # 当前 schema 版本。后续阶段新增/修改表结构时应递增，并补上迁移逻辑。
-SCHEMA_VERSION: Final[int] = 7
+# 版本 8（Stage 19）：新增 strategy_definitions（Strategy 身份表）；
+#                    strategies 增加 strategy_id 列（版本 → 策略），并补充幂等回填
+# 版本 9（Stage 20）：新增 symbol_groups / symbol_group_members（市场分类与标的集合）；
+#                    纯新增表，不动 symbols / klines 及任何已有表
+SCHEMA_VERSION: Final[int] = 9
 
 # 时间统一格式（SQLite 稳定支持，不引入第三方时间库）
 TIMESTAMP_FORMAT: Final[str] = "%Y-%m-%d %H:%M:%S"
@@ -39,15 +43,24 @@ TIMESTAMP_FORMAT: Final[str] = "%Y-%m-%d %H:%M:%S"
 SYMBOLS_TABLE: Final[str] = "symbols"
 KLINES_TABLE: Final[str] = "klines"
 STRATEGIES_TABLE: Final[str] = "strategies"
+#: Strategy 身份表（Stage 19）：一个策略本身（与“策略版本”分开）
+STRATEGY_DEFINITIONS_TABLE: Final[str] = "strategy_definitions"
 SIGNALS_TABLE: Final[str] = "signals"
 TRADES_TABLE: Final[str] = "trades"
 POSITIONS_TABLE: Final[str] = "positions"
 ORDERS_TABLE: Final[str] = "orders"
+#: 市场分类 / 标的集合（Stage 20）：行业、概念、自选、自定义股票池
+SYMBOL_GROUPS_TABLE: Final[str] = "symbol_groups"
+#: 集合成员关系（Stage 20）：group ↔ symbol 多对多
+SYMBOL_GROUP_MEMBERS_TABLE: Final[str] = "symbol_group_members"
 
 # 数据库初始化后应当存在的业务表（后续阶段新增表时在这里登记）
 BUSINESS_TABLES: Final[tuple[str, ...]] = (
     SYMBOLS_TABLE,
     KLINES_TABLE,
+    SYMBOL_GROUPS_TABLE,
+    SYMBOL_GROUP_MEMBERS_TABLE,
+    STRATEGY_DEFINITIONS_TABLE,
     STRATEGIES_TABLE,
     SIGNALS_TABLE,
     TRADES_TABLE,
@@ -121,6 +134,56 @@ CREATE TABLE IF NOT EXISTS {KLINES_TABLE} (
 #   "某标的 + 某周期 + 时间区间" 完全一致），因此**不再**额外创建重复索引。
 
 # ---------------------------------------------------------------------------
+# symbol_groups / symbol_group_members：市场分类与标的集合（Stage 20）
+#
+# 设计要点：
+#   1. symbol_groups 表达「行业板块 / 概念板块 / 自选 / 自定义股票池」；
+#      group_type 由 CHECK 约束固定为四种，取值来源与 Python 层共用 GROUP_TYPES
+#   2. market 可空：为空表示跨市场集合（例如「我的自选」可同时放 A 股与加密）；
+#      **不**限定取值，沿用 symbols.market 的自由文本约定
+#   3. symbol_group_members 是 group ↔ symbol 的多对多关系，
+#      UNIQUE(group_id, symbol_id) 由数据库保证同一标的不会重复加入同一集合
+#   4. 本阶段**不建**独立 universe 表：一个 group 就是一个标的集合（Universe），
+#      未来需要动态 Universe（Top20 市值等）时再在其上加规则层
+#   5. 「移出集合」用物理删除成员关系表示，与 symbols 的 is_active 逻辑停用互不影响
+# ---------------------------------------------------------------------------
+GROUP_TYPES: Final[tuple[str, ...]] = ("industry", "concept", "watchlist", "custom")
+
+_GROUP_TYPE_SQL_LIST: Final[str] = ", ".join(f"'{t}'" for t in GROUP_TYPES)
+
+CREATE_SYMBOL_GROUPS_TABLE_SQL: Final[str] = f"""
+CREATE TABLE IF NOT EXISTS {SYMBOL_GROUPS_TABLE} (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL,
+    group_type  TEXT    NOT NULL,
+    market      TEXT,
+    description TEXT,
+    is_active   INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+    created_at  TEXT    NOT NULL DEFAULT (strftime('{TIMESTAMP_FORMAT}', 'now')),
+    updated_at  TEXT    NOT NULL DEFAULT (strftime('{TIMESTAMP_FORMAT}', 'now')),
+    CONSTRAINT uq_symbol_groups_name UNIQUE (name),
+    CONSTRAINT ck_symbol_groups_group_type CHECK (group_type IN ({_GROUP_TYPE_SQL_LIST}))
+)
+"""
+
+CREATE_SYMBOL_GROUP_MEMBERS_TABLE_SQL: Final[str] = f"""
+CREATE TABLE IF NOT EXISTS {SYMBOL_GROUP_MEMBERS_TABLE} (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id   INTEGER NOT NULL REFERENCES {SYMBOL_GROUPS_TABLE}(id),
+    symbol_id  INTEGER NOT NULL REFERENCES {SYMBOLS_TABLE}(id),
+    created_at TEXT    NOT NULL DEFAULT (strftime('{TIMESTAMP_FORMAT}', 'now')),
+    CONSTRAINT uq_symbol_group_members_group_symbol UNIQUE (group_id, symbol_id)
+)
+"""
+
+# 反向查询索引：UNIQUE(group_id, symbol_id) 的隐式索引已覆盖
+# 「某个集合里有哪些标的」；下面这个索引服务「某个标的属于哪些集合」。
+CREATE_SYMBOL_GROUP_MEMBERS_INDEX_SQL: Final[str] = f"""
+CREATE INDEX IF NOT EXISTS idx_symbol_group_members_symbol
+ON {SYMBOL_GROUP_MEMBERS_TABLE} (symbol_id)
+"""
+
+# ---------------------------------------------------------------------------
 # strategies：策略定义与策略版本
 #
 # 设计要点：
@@ -161,6 +224,73 @@ CREATE TABLE IF NOT EXISTS {STRATEGIES_TABLE} (
         CHECK (status IN ({_STRATEGY_STATUS_SQL_LIST}))
 )
 """
+
+
+# ---------------------------------------------------------------------------
+# strategy_definitions：**Strategy 身份**（Stage 19）
+#
+# 与 strategies（策略版本）分开：
+#   strategy_definitions  一个策略本身：name 唯一，有自己的 status / 生命周期
+#   strategies            该策略的一个版本：version + config，每个版本一行
+#
+# 关联方向：
+#   strategies.strategy_id          → strategy_definitions(id)：版本属于哪个策略
+#   signals.strategy_id             → strategies(id)：信号来自哪个**版本**（沿用现有字段，不重复加列）
+#   trades.signal_id                → signals(id)：成交 → 信号 → 版本 → 策略
+#
+# 于是任意 Signal / Trade 都能回答「来自哪个策略、哪个版本」（见 strategies/service.py）。
+# 说明：strategies 那栏的“策略版本”语义早已在第一个 Stage 确定（每版一行、不覆盖旧版），
+#       本阶段只是把「策略身份」拆出来，不重建已工作的版本表。
+# ---------------------------------------------------------------------------
+CREATE_STRATEGY_DEFINITIONS_TABLE_SQL: Final[str] = f"""
+CREATE TABLE IF NOT EXISTS {STRATEGY_DEFINITIONS_TABLE} (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL,
+    description TEXT,
+    status      TEXT    NOT NULL DEFAULT '{DEFAULT_STRATEGY_STATUS}',
+    created_at  TEXT    NOT NULL DEFAULT (strftime('{TIMESTAMP_FORMAT}', 'now')),
+    updated_at  TEXT    NOT NULL DEFAULT (strftime('{TIMESTAMP_FORMAT}', 'now')),
+    CONSTRAINT uq_strategy_definitions_name UNIQUE (name),
+    CONSTRAINT ck_strategy_definitions_status
+        CHECK (status IN ({_STRATEGY_STATUS_SQL_LIST}))
+)
+"""
+
+# strategies 增加 strategy_id 列。
+# SQLite 不支持 ADD COLUMN IF NOT EXISTS，所以由 database.initialize_database()
+# 先查 PRAGMA table_info 再决定是否执行（幂等）。
+ADD_STRATEGIES_STRATEGY_ID_SQL: Final[str] = (
+    f"ALTER TABLE {STRATEGIES_TABLE} ADD COLUMN strategy_id INTEGER "
+    f"REFERENCES {STRATEGY_DEFINITIONS_TABLE}(id)"
+)
+
+# 幂等回填（老数据也能追溯）：按 name 为已有的策略版本补建 Strategy 身份，再建立关联。
+BACKFILL_STRATEGY_DEFINITIONS_SQL: Final[str] = f"""
+INSERT OR IGNORE INTO {STRATEGY_DEFINITIONS_TABLE}
+    (name, description, status, created_at, updated_at)
+SELECT name, NULL, '{DEFAULT_STRATEGY_STATUS}', MIN(created_at), MAX(updated_at)
+  FROM {STRATEGIES_TABLE}
+ GROUP BY name
+"""
+
+LINK_STRATEGIES_TO_DEFINITIONS_SQL: Final[str] = f"""
+UPDATE {STRATEGIES_TABLE}
+   SET strategy_id = (
+        SELECT d.id FROM {STRATEGY_DEFINITIONS_TABLE} d WHERE d.name = {STRATEGIES_TABLE}.name
+   )
+ WHERE strategy_id IS NULL
+"""
+
+
+def backfill_statements() -> list[tuple[str, tuple[object, ...]]]:
+    """返回 schema 适应后的幂等回填语句（在建表 + 加列之后执行）。
+
+    新库不会插入任何行，也不会改变文件大小；老库会补齐 Strategy 身份并建立关联。
+    """
+    return [
+        (BACKFILL_STRATEGY_DEFINITIONS_SQL, ()),
+        (LINK_STRATEGIES_TO_DEFINITIONS_SQL, ()),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -359,10 +489,15 @@ def initialization_statements() -> list[tuple[str, tuple[object, ...]]]:
     全部语句都必须是幂等的：
     重复执行 initialize_database() 不能报错。
     klines 建表语句必须排在 symbols 之后（外键引用 symbols(id)）。
+    strategy_definitions 建表语句必须排在 strategies 之后被引用的位置（strategies.strategy_id 引用它）。
     """
     return [
         (CREATE_SYMBOLS_TABLE_SQL, ()),
         (CREATE_KLINES_TABLE_SQL, ()),
+        (CREATE_SYMBOL_GROUPS_TABLE_SQL, ()),
+        (CREATE_SYMBOL_GROUP_MEMBERS_TABLE_SQL, ()),
+        (CREATE_SYMBOL_GROUP_MEMBERS_INDEX_SQL, ()),
+        (CREATE_STRATEGY_DEFINITIONS_TABLE_SQL, ()),
         (CREATE_STRATEGIES_TABLE_SQL, ()),
         (CREATE_SIGNALS_TABLE_SQL, ()),
         (CREATE_SIGNALS_INDEX_SQL, ()),

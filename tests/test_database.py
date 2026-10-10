@@ -118,11 +118,24 @@ class DatabaseFileTest(TempDatabaseTestCase):
         initialize_database(self.db_path)
 
         info = database_info(self.db_path)
-        # Stage 03~09 依次引入了 7 张业务表；任何其他表出现都说明提前实现了后续阶段
+        # Stage 03~09 引入 7 张业务表；Stage 19 新增 strategy_definitions（Strategy 身份表）；
+        # Stage 20 新增 symbol_groups / symbol_group_members（市场分类与标的集合）。
+        # 任何**未登记**的表出现都说明提前实现了后续阶段。
         self.assertEqual(
             sorted(info["tables"]),
-            ["klines", "orders", "positions", "signals", "strategies", "symbols", "trades"],
-            f"初始化后应只存在已登记的 7 张业务表，却有: {info['tables']}",
+            [
+                "klines",
+                "orders",
+                "positions",
+                "signals",
+                "strategies",
+                "strategy_definitions",
+                "symbol_group_members",
+                "symbol_groups",
+                "symbols",
+                "trades",
+            ],
+            f"初始化后应只存在已登记的 10 张业务表，却有: {info['tables']}",
         )
 
         for name in FORBIDDEN_BUSINESS_TABLES:

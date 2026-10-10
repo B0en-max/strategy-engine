@@ -15,7 +15,7 @@
 
 from .base import DataSourceError, KlineBar, KlineDataSource, timeframe_to_seconds
 from .http_source import HttpKlineDataSource
-from .importer import ImportResult, import_klines
+from .importer import ImportResult, import_klines, prepare_kline_rows
 from .presets import SINA_KLINE_URL, SINA_TIMEFRAME_MAPPING, sina_cn_kline_config
 
 __all__ = [
@@ -27,6 +27,7 @@ __all__ = [
     "SINA_KLINE_URL",
     "SINA_TIMEFRAME_MAPPING",
     "import_klines",
+    "prepare_kline_rows",
     "sina_cn_kline_config",
     "timeframe_to_seconds",
 ]

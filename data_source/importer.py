@@ -36,30 +36,22 @@ class ImportResult:
     written: int
 
 
-def import_klines(
+def prepare_kline_rows(
     source: KlineDataSource,
-    repository: KlineRepository,
-    symbol_id: int,
     *,
     symbol: str,
     timeframe: str,
+    symbol_id: int,
     start_timestamp: str | None = None,
     end_timestamp: str | None = None,
-) -> ImportResult:
-    """从数据源采集一段历史 K 线并写入数据库，返回采集结果。
+) -> tuple[int, list[dict[str, object]]]:
+    """向数据源取数 → 校验 → 转换 → 本地裁切 → 排序，**不写库**。
 
-    参数：
-        source          任意实现了 KlineDataSource 的数据源
-        repository      现有 KlineRepository（负责实际写库）
-        symbol_id       klines.symbol_id（对应 symbols 表中的标的）
-        symbol          外部数据源使用的标的代码（例如 "sh600519"）
-        timeframe       K 线周期（例如 "15m"）
-        start_timestamp 起始时间（含），UTC 'YYYY-MM-DD HH:MM:SS'
-        end_timestamp   结束时间（含），UTC 'YYYY-MM-DD HH:MM:SS'
+    返回 (数据源返回的条数, 待写入的行)。
 
-    时间范围处理：
-        时间范围会先传给数据源；若数据源不支持范围参数（例如只返回最近 N 根），
-        返回结果会再在本地按 [start, end]（**闭区间**）裁切，保证入库数据落在请求范围内。
+    这是「预演（dry-run）」与「正式导入」共用的同一套规则：
+    先全部转换并校验格式（任何格式错误都在写库之前中止），
+    再按 [start, end]（**闭区间**）裁切，保证入库数据落在请求范围内。
     """
     symbol_id = require_positive_int(symbol_id, "symbol_id")
     symbol = require_symbol_code(symbol)
@@ -92,6 +84,42 @@ def import_klines(
         ]
 
     rows.sort(key=lambda row: str(row["timestamp"]))
+    return fetched, rows
+
+
+def import_klines(
+    source: KlineDataSource,
+    repository: KlineRepository,
+    symbol_id: int,
+    *,
+    symbol: str,
+    timeframe: str,
+    start_timestamp: str | None = None,
+    end_timestamp: str | None = None,
+) -> ImportResult:
+    """从数据源采集一段历史 K 线并写入数据库，返回采集结果。
+
+    参数：
+        source          任意实现了 KlineDataSource 的数据源
+        repository      现有 KlineRepository（负责实际写库）
+        symbol_id       klines.symbol_id（对应 symbols 表中的标的）
+        symbol          外部数据源使用的标的代码（例如 "sh600519"）
+        timeframe       K 线周期（例如 "15m"）
+        start_timestamp 起始时间（含），UTC 'YYYY-MM-DD HH:MM:SS'
+        end_timestamp   结束时间（含），UTC 'YYYY-MM-DD HH:MM:SS'
+
+    时间范围处理：
+        时间范围会先传给数据源；若数据源不支持范围参数（例如只返回最近 N 根），
+        返回结果会再在本地按 [start, end]（**闭区间**）裁切，保证入库数据落在请求范围内。
+    """
+    fetched, rows = prepare_kline_rows(
+        source,
+        symbol=symbol,
+        timeframe=timeframe,
+        symbol_id=symbol_id,
+        start_timestamp=start_timestamp,
+        end_timestamp=end_timestamp,
+    )
 
     written = 0 if not rows else repository.bulk_upsert_klines(rows)
     return ImportResult(

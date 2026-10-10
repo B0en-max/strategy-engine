@@ -254,6 +254,20 @@ class KlineRepository(Repository):
             (symbol_id, timeframe),
         )
 
+    def list_recent_klines(
+        self,
+        symbol_id: int,
+        timeframe: str,
+        count: int,
+    ) -> list[sqlite3.Row]:
+        """返回**最近 count 根** K 线（仍按时间升序，最后一根是最新的）。
+
+        只读便捷方法：直接复用 list_klines 的 limit 语义（先 DESC 取最近 N 条，
+        再在外层恢复升序），**不改动任何既有方法的语义**；
+        用于「最新行情 / 涨跌」这类只需要尾部几根 K 线的场景。
+        """
+        return self.list_klines(symbol_id, timeframe, limit=count)
+
     def list_klines(
         self,
         symbol_id: int,

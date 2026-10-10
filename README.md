@@ -24,14 +24,15 @@ Strategy Engine 是一个**独立运行**的本地量化交易策略系统，不
 
 ## 3. 当前开发阶段
 
-**Stage 16 — 执行器 API 层**
+**Stage 19 — 通用 Executor + Strategy / Strategy Version**
 
-已建立 `api/`（FastAPI）：把 `StrategyRunner` / `ExecutionEngine` 封装成稳定的 HTTP 接口，
-供下一阶段前端调用。**本层只做参数校验、资源存在性检查与 JSON 转换**。
+把「执行某一套固定策略的执行器」整理为「通用 Executor + 独立 Strategy + Strategy Version」：
 
 ```
-Frontend → API → StrategyRunner / ExecutionEngine → Repository → SQLite
+Strategy（身份） → Strategy Version（参数） → StrategyExecutor → Signal → Trade → 复盘 / 策略系统
 ```
+
+Executor 不写死任何策略规则；策略只做判断，且逐根 K 线只能看到当前及历史（无未来数据）。
 
 ### 如何启动 API（本地开发）
 
@@ -117,7 +118,15 @@ $env:STRATEGY_ENGINE_DB_PATH = "C:\path\to\strategy_engine.db"
 ## 5. 数据库结构
 
 数据库文件：`data/strategy_engine.db`（运行产物，被 `.gitignore` 忽略，**不入 Git**）。
-当前 `PRAGMA user_version = 5`。所有时间戳均为 **UTC**，格式 `YYYY-MM-DD HH:MM:SS`。
+当前 `PRAGMA user_version = 8`。所有时间戳均为 **UTC**，格式 `YYYY-MM-DD HH:MM:SS`。
+
+Stage 19 的 schema 变化（迁移幂等，不删任何数据）：
+
+- 新增 **`strategy_definitions`**：Strategy **身份**（`name` 唯一，有自己的 `status` / 生命周期）
+- `strategies` 新增 **`strategy_id`**（该版本属于哪个 Strategy，允许 NULL，引用 `strategy_definitions(id)`）
+- `initialize_database()` 会补列并回填：老版本行自动补齐 Strategy 身份并建立关联
+- 追溯链：`signals.strategy_id` → `strategies`（**策略版本**）→ `strategy_definitions`（策略）；
+  `trades.signal_id` → `signals`（于是成交也能追溯到策略与版本）
 
 ### `symbols` — 交易标的（Stage 03）
 
@@ -432,6 +441,32 @@ $env:STRATEGY_ENGINE_DB_PATH = "C:\path\to\strategy_engine.db"
 - [x] 无头 Chromium 真实渲染验收：600519 + 15m 共 320 根；图例 OHLC 与接口逐字段一致；319/319 信号匹配；
   切 1d 后旧 K 线与旧标记不残留；运行策略 / 模拟执行链路正常；浏览器 console 无未捕获错误
 
+### Stage 19 — 通用 Executor + Strategy / Strategy Version
+
+- [x] `database/models.py`：新增 **`strategy_definitions`**（Strategy 身份表）+ `ADD_STRATEGIES_STRATEGY_ID_SQL`
+      + 幂等回填语句；schema 版本 → **8**
+- [x] `database/database.py`：`initialize_database()` 增加幂等**列级迁移**（SQLite 无 ADD COLUMN IF NOT EXISTS）
+      与回填调用（建表 → 补列 → 回填，重复执行不改动数据库）
+- [x] `database/strategy_definition_repository.py`：`StrategyDefinitionRepository`
+      （create / ensure（get-or-create）/ get / get_by_name / list / count / update_status）
+- [x] `database/strategy_repository.py`：新增 `create_version()` / `list_versions()` / `get_version()` /
+      `get_version_by_number()` / `next_version()`；旧 `create_strategy()` 保持可用，并自动 ensure 并关联 Strategy 身份
+- [x] `strategies/base.py`：新增 `BarWindow`（只有当前 K 线 + 历史，**物理上不含未来**）与增量接口
+      `Strategy.on_bar()`；批量 `generate()` 改为由 `on_bar()` 逐根推导（两种入口结果一致）
+- [x] `strategies/close_direction.py`：改为实现 `on_bar()`（规则不变；本阶段的 **Demo Strategy**）
+- [x] `strategies/executor.py`：`StrategyExecutor`（不写死任何具体策略）
+  * 入参：`strategy_id` + **`strategy_version_id`** + `symbol_id` + `timeframe` + 起止时间
+  * 逐根推进：`BarWindow` → `on_bar` → Signal（`signals.strategy_id` = 版本）→ `ExecutionEngine` → Trade
+  * 策略返回的信号时间戳必须等于当前 K 线时间戳，否则报错（**禁止把信号挂到未来**）
+  * 默认在**临时运行库**执行（正式库只读）；显式传 `run_db_path` 可就地执行或保留运行库
+- [x] `strategies/service.py`：`StrategyService`（Strategy / 版本 / **追溯** / 执行入口 的统一门面）
+- [x] `api`：新增 `GET /strategy-definitions`、`GET /strategy-definitions/{id}/versions`、
+      `POST /executor/run`、`GET /signals/{id}/trace`、`GET /trades/{id}/trace`；**既有端点完全不变**
+- [x] `tests/test_strategy_versioning.py`（17 例）：schema / 迁移与回填 / Strategy 与版本 CRUD / 多版本 / 严格创建与约束
+- [x] `tests/test_strategy_executor.py`（20 例）：指定版本执行、Signal / Trade 追溯、多版本独立、
+      **未来数据隔离（窗口内容 + 前缀不变性 + 拒绝未来时间戳）**、重复执行结果一致、正式库只读、新端点
+- [x] 验收：同一份数据 + 同一版本执行两次结果逐项一致（Signal / Trade / 持仓）；v1 与 v2 独立执行且分别可追溯
+
 #### 当前已支持
 
 - `symbols` 标的
@@ -451,6 +486,8 @@ $env:STRATEGY_ENGINE_DB_PATH = "C:\path\to\strategy_engine.db"
   查看信号、对 pending 信号模拟执行、查看持仓/订单/成交（仅操作本地模拟执行器）
 - **K 线与信号可视化**：lightweight-charts 主图 + 信号叠加（按时间戳精确匹配，pending / executed 区分，
   悬停 / 点击看信号详情），只消费现有 `/klines` 与 signals 接口
+- **通用执行器 + 策略版本**：Strategy（身份）/ Strategy Version（参数）分离，`StrategyExecutor` 按指定版本
+  逐根执行，Signal / Trade 都能追溯到策略与版本；未来数据隔离由接口保证
 
 #### 当前仍未实现
 

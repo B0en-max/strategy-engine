@@ -153,6 +153,20 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
             conn.execute("COMMIT")
 
 
+def _migrate_strategies_strategy_id(conn: sqlite3.Connection) -> None:
+    """幂等地给 strategies 表补上 strategy_id 列（版本 → Strategy 身份）。
+
+    SQLite 支持 ADD COLUMN，但不支持 IF NOT EXISTS，所以先查 PRAGMA table_info；
+    列已存在时什么都不做（保证 initialize_database 可重复执行且不改动数据库）。
+    """
+    columns = {
+        row["name"]
+        for row in conn.execute(f"PRAGMA table_info({models.STRATEGIES_TABLE})").fetchall()
+    }
+    if "strategy_id" not in columns:
+        conn.execute(models.ADD_STRATEGIES_STRATEGY_ID_SQL)
+
+
 def initialize_database(db_path: DatabasePath | None = None) -> Path:
     """初始化数据库，返回数据库文件路径。
 
@@ -168,6 +182,10 @@ def initialize_database(db_path: DatabasePath | None = None) -> Path:
     path = ensure_database_dir(db_path)
     with connection(path) as conn:
         for sql, params in models.initialization_statements():
+            conn.execute(sql, params)
+        # Stage 19：建表之后补列，再执行幂等回填（新库两步都是空操作）
+        _migrate_strategies_strategy_id(conn)
+        for sql, params in models.backfill_statements():
             conn.execute(sql, params)
     return path
 

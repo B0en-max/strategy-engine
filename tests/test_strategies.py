@@ -94,7 +94,19 @@ class StrategySchemaTest(StrategyTestCase):
         }
         self.assertEqual(
             list(columns.keys()),
-            ["id", "name", "description", "status", "version", "config", "created_at", "updated_at"],
+            # Stage 19：strategies 增加 strategy_id（该版本属于哪个 Strategy），
+            # 由 initialize_database() 的幂等迁移（ALTER TABLE ADD COLUMN）补上
+            [
+                "id",
+                "name",
+                "description",
+                "status",
+                "version",
+                "config",
+                "created_at",
+                "updated_at",
+                "strategy_id",
+            ],
         )
 
         self.assertEqual(columns["id"]["type"].upper(), "INTEGER")
@@ -104,6 +116,8 @@ class StrategySchemaTest(StrategyTestCase):
             with self.subTest(field=field):
                 self.assertEqual(columns[field]["notnull"], 1, f"{field} 应为 NOT NULL")
         self.assertEqual(columns["description"]["notnull"], 0, "description 应允许 NULL")
+        # strategy_id 允许为 NULL（老数据 / 未建立 Strategy 身份时）
+        self.assertEqual(columns["strategy_id"]["notnull"], 0, "strategy_id 应允许 NULL")
 
         self.assertEqual(columns["name"]["type"].upper(), "TEXT")
         self.assertEqual(columns["description"]["type"].upper(), "TEXT")

@@ -9,8 +9,10 @@
     Repository              最小数据访问层
     unit_of_work()          把多个 Repository 绑定到同一个事务（跨表原子写入）
     SymbolRepository        标的基础数据访问层（symbols 表）
+    SymbolGroupRepository   市场分类 / 标的集合数据访问层（Stage 20）
     KlineRepository         K 线数据访问层（klines 表）
-    StrategyRepository     策略定义与版本的数据访问层（strategies 表）
+    StrategyRepository     策略版本的数据访问层（strategies 表，每版一行）
+StrategyDefinitionRepository  Strategy 身份的数据访问层（strategy_definitions 表，Stage 19）
     SignalRepository       交易信号数据访问层（signals 表）
     TradeRepository        实际成交记录数据访问层（trades 表）
     PositionRepository     当前持仓数据访问层（positions 表）
@@ -45,7 +47,9 @@ from .order_repository import OrderRepository
 from .position_repository import PositionRepository
 from .repository import Repository, unit_of_work
 from .signal_repository import SignalRepository
+from .strategy_definition_repository import StrategyDefinitionRepository
 from .strategy_repository import StrategyRepository
+from .symbol_group_repository import SymbolGroupRepository
 from .symbol_repository import SymbolRepository
 from .trade_repository import TradeRepository
 
@@ -59,7 +63,9 @@ __all__ = [
     "PositionRepository",
     "Repository",
     "SignalRepository",
+    "StrategyDefinitionRepository",
     "StrategyRepository",
+    "SymbolGroupRepository",
     "SymbolRepository",
     "TradeRepository",
     "close",
