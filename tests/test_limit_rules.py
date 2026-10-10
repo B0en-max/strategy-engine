@@ -29,6 +29,7 @@ from market.rules import (  # noqa: E402
     BOARD_LIMIT_RATIOS,
     LISTING_STAGE_MAIN_FIRST_DAY,
     LISTING_STAGE_NO_LIMIT,
+    LIMIT_STAGES,
     LISTING_STAGE_TRADING,
     SSE_MAIN,
     SSE_STAR,
@@ -408,6 +409,41 @@ class ExRightsToLimitsBoundaryTest(unittest.TestCase):
         result = compute_limit_prices(None, board=SZSE_MAIN, prev_close_is_exchange_reference=True)
         self.assertEqual(result.status, STATUS_UNKNOWN)
         self.assertIsNone(result.upper)
+
+
+
+class RuleBasisAuditTest(unittest.TestCase):
+    """D6：把规则映射审计结论固化为回归（不改变任何规则行为）。
+
+    规则依据（**历史证据**：2021-05-15 版《深圳证券交易所交易规则》；现行版本条款原文未取得）：
+      3.3.15 股票涨跌幅限制比例 10%；
+      3.3.16 涨跌幅限制价格 = 前收盘价×(1±比例)，四舍五入至价格最小变动单位；
+      4.5.5 主板风险警示股票 5%、退市整理股票 10%、创业板风险警示/退市整理股票 20%；
+      4.5.6 退市整理期首个交易日不实行价格涨跌幅限制。
+    """
+
+    def test_st_ratio_mapping_matches_documented_clause(self) -> None:
+        # 主板风险警示 5%、创业板风险警示 20%（与条款逐项对齐）
+        self.assertEqual(resolve_limit_ratio(SSE_MAIN, is_st=True)[0], Decimal("0.05"))
+        self.assertEqual(resolve_limit_ratio(SZSE_MAIN, is_st=True)[0], Decimal("0.05"))
+        self.assertEqual(resolve_limit_ratio(SZSE_GEM, is_st=True)[0], Decimal("0.20"))
+
+    def test_resume_never_auto_gains_no_limit(self) -> None:
+        # 未确认的复牌情形不得自动获得“无涨跌幅限制”：只有显式 stage 才返回 no_limit
+        normal = compute_limit_prices("10.00", board=SSE_MAIN, prev_close_is_exchange_reference=True)
+        self.assertEqual(normal.status, STATUS_OK)
+        explicit = compute_limit_prices("10.00", board=SSE_MAIN, listing_stage=LISTING_STAGE_NO_LIMIT)
+        self.assertEqual(explicit.status, STATUS_NO_LIMIT)
+
+    def test_delisting_consolidation_is_not_expressible(self) -> None:
+        # 接口缺口：现有输入无法表达“退市整理期股票”（主板 10% / 首日不设限）→ 不得猜测
+        for bogus in ("delisting_consolidation", "退市整理期"):
+            result = compute_limit_prices("10.00", board=SSE_MAIN, listing_stage=bogus,
+                                          prev_close_is_exchange_reference=True)
+            self.assertEqual(result.status, STATUS_UNKNOWN, bogus)
+            self.assertIsNone(result.upper)
+        self.assertEqual(LIMIT_STAGES, (LISTING_STAGE_TRADING, LISTING_STAGE_NO_LIMIT,
+                                        LISTING_STAGE_MAIN_FIRST_DAY))
 
 
 if __name__ == "__main__":
