@@ -38,11 +38,16 @@ from market.rules import (  # noqa: E402
     SZSE_GEM,
     SZSE_MAIN,
     classify_bar_against_limits,
+    EVENT_REGULAR,
+    SOURCE_AGREE,
+    ExRightsFields,
     compute_limit_prices,
     resolve_limit_ratio,
     resolve_listing_stage,
     resolve_prev_close,
     round_to_tick,
+    usable_reference_prev_close,
+    verify_ex_rights_reference,
 )
 
 FORMAL_DB = PROJECT_ROOT / "data" / "strategy_engine.db"
@@ -76,7 +81,7 @@ class LimitRatioTest(unittest.TestCase):
         # 制度 + 实证：科创板 *ST 涨跌幅仍为 20%（实测 13 只科创板 ST 最大日内涨幅 20.45%）
         ratio, basis = resolve_limit_ratio(SSE_STAR, is_st=True)
         self.assertEqual(ratio, Decimal("0.20"))
-        self.assertEqual(compute_limit_prices("10.00", board=SSE_STAR, is_st=True).upper, Decimal("12.00"))
+        self.assertEqual(compute_limit_prices("10.00", board=SSE_STAR, is_st=True, prev_close_is_exchange_reference=True).upper, Decimal("12.00"))
 
     def test_every_board_has_normal_and_st_ratio(self) -> None:
         # 5 个板块都必须能给出常规与 ST 两套比例，不得出现“板块存在但 ST 无比例”的隐式缺口
@@ -98,7 +103,7 @@ class LimitRatioTest(unittest.TestCase):
 
 class LimitPriceTest(unittest.TestCase):
     def test_main_board_prices(self) -> None:
-        result = compute_limit_prices("1258.62", board=SSE_MAIN)
+        result = compute_limit_prices("1258.62", board=SSE_MAIN, prev_close_is_exchange_reference=True)
         self.assertEqual(result.status, STATUS_OK)
         self.assertEqual(result.upper, Decimal("1384.48"))
         self.assertEqual(result.lower, Decimal("1132.76"))
@@ -106,27 +111,28 @@ class LimitPriceTest(unittest.TestCase):
     def test_rounding_is_half_up(self) -> None:
         # 10.05 × 1.1 = 11.055 → half-up 11.06（银行家舍入会得 11.06 之外的结果）
         self.assertEqual(round_to_tick(Decimal("11.055")), Decimal("11.06"))
-        upper = compute_limit_prices("10.05", board=SSE_MAIN).upper
+        upper = compute_limit_prices("10.05", board=SSE_MAIN, prev_close_is_exchange_reference=True).upper
         self.assertEqual(upper, Decimal("11.06"))
-        self.assertEqual(compute_limit_prices("10.05", board=SSE_MAIN).lower, Decimal("9.05"))
+        self.assertEqual(compute_limit_prices("10.05", board=SSE_MAIN, prev_close_is_exchange_reference=True).lower, Decimal("9.05"))
 
     def test_matches_real_observed_limit_up_examples(self) -> None:
         # 来自实测：600010 前收 1.90 → 涨停 2.09；300001 前收 24.11 → 28.93
-        self.assertEqual(compute_limit_prices("1.90", board=SSE_MAIN).upper, Decimal("2.09"))
-        self.assertEqual(compute_limit_prices("24.11", board=SZSE_GEM).upper, Decimal("28.93"))
+        self.assertEqual(compute_limit_prices("1.90", board=SSE_MAIN, prev_close_is_exchange_reference=True).upper, Decimal("2.09"))
+        self.assertEqual(compute_limit_prices("24.11", board=SZSE_GEM, prev_close_is_exchange_reference=True).upper, Decimal("28.93"))
 
     def test_st_main_board_5_percent(self) -> None:
-        result = compute_limit_prices("10.00", board=SSE_MAIN, is_st=True)
+        result = compute_limit_prices("10.00", board=SSE_MAIN, is_st=True, prev_close_is_exchange_reference=True)
         self.assertEqual(result.upper, Decimal("10.50"))
         self.assertEqual(result.lower, Decimal("9.50"))
 
     def test_bse_30_percent(self) -> None:
-        result = compute_limit_prices("20.00", board=BSE)
+        result = compute_limit_prices("20.00", board=BSE, prev_close_is_exchange_reference=True)
         self.assertEqual(result.upper, Decimal("26.00"))
         self.assertEqual(result.lower, Decimal("14.00"))
 
     def test_custom_tick(self) -> None:
-        result = compute_limit_prices("10.005", board=SSE_MAIN, tick=Decimal("0.001"))
+        result = compute_limit_prices("10.005", board=SSE_MAIN, prev_close_is_exchange_reference=True,
+                                      tick=Decimal("0.001"))
         self.assertEqual(result.upper, Decimal("11.006"))
 
     def test_new_listing_stage_has_no_limit(self) -> None:
@@ -148,12 +154,12 @@ class LimitPriceTest(unittest.TestCase):
 
     def test_invalid_prev_close_is_unknown(self) -> None:
         for value in (None, 0, -1, "abc", "", float("nan")):
-            result = compute_limit_prices(value, board=SSE_MAIN)
+            result = compute_limit_prices(value, board=SSE_MAIN, prev_close_is_exchange_reference=True)
             self.assertEqual(result.status, STATUS_UNKNOWN, f"value={value!r}")
             self.assertIsNone(result.upper)
 
     def test_unknown_board_yields_unknown_status(self) -> None:
-        result = compute_limit_prices("10.00", board=None)
+        result = compute_limit_prices("10.00", board=None, prev_close_is_exchange_reference=True)
         self.assertEqual(result.status, STATUS_UNKNOWN)
         self.assertIsNone(result.upper)
 
@@ -321,7 +327,7 @@ class TempDatabaseIntegrationTest(unittest.TestCase):
             symbol_id = self.symbols.get_symbol("CN", code)["id"]
             bars = self.klines.list_klines(symbol_id, "1d")
             prev = resolve_prev_close(bars[-2]["close"], sessions_since_prev_bar=1)
-            limit = compute_limit_prices(prev.prev_close, board=SSE_MAIN)
+            limit = compute_limit_prices(prev.prev_close, board=SSE_MAIN, prev_close_is_exchange_reference=True)
             self.assertEqual(limit.status, STATUS_OK)
             state = classify_bar_against_limits(
                 high=bars[-1]["high"], low=bars[-1]["low"], close=bars[-1]["close"],
@@ -334,7 +340,7 @@ class TempDatabaseIntegrationTest(unittest.TestCase):
         # 假设 09-29 该标的没有 K 线：只能得到 unknown
         result = resolve_prev_close(None, bar_present=False, sessions_since_prev_bar=None)
         self.assertEqual(result.status, STATUS_UNKNOWN)
-        limit = compute_limit_prices(result.prev_close, board=SZSE_MAIN)
+        limit = compute_limit_prices(result.prev_close, board=SZSE_MAIN, prev_close_is_exchange_reference=True)
         self.assertEqual(limit.status, STATUS_UNKNOWN)
 
     def test_formal_database_untouched(self) -> None:
@@ -344,6 +350,64 @@ class TempDatabaseIntegrationTest(unittest.TestCase):
         after = (FORMAL_DB.stat().st_size, FORMAL_DB.stat().st_mtime)
         self.assertEqual(self.formal_before, after)
         self.assertNotEqual(os.fspath(self.db_path), os.fspath(FORMAL_DB))
+
+
+
+class FailClosedTest(unittest.TestCase):
+    """D4：涨跌停计算不得默认信任参考前收（fail-closed）。"""
+
+    def test_missing_flag_is_unknown(self) -> None:
+        result = compute_limit_prices("10.00", board=SSE_MAIN)
+        self.assertEqual(result.status, STATUS_UNKNOWN)
+        self.assertIsNone(result.upper)
+        self.assertIsNone(result.lower)
+
+    def test_explicit_none_flag_is_unknown(self) -> None:
+        result = compute_limit_prices("10.00", board=SSE_MAIN, prev_close_is_exchange_reference=None)
+        self.assertEqual(result.status, STATUS_UNKNOWN)
+        self.assertIsNone(result.upper)
+
+    def test_false_flag_is_unknown(self) -> None:
+        result = compute_limit_prices("10.00", board=SSE_MAIN, prev_close_is_exchange_reference=False)
+        self.assertEqual(result.status, STATUS_UNKNOWN)
+        self.assertIsNone(result.upper)
+
+    def test_non_bool_flag_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            compute_limit_prices("10.00", board=SSE_MAIN, prev_close_is_exchange_reference=1)
+
+    def test_true_flag_computes(self) -> None:
+        result = compute_limit_prices("10.00", board=SSE_MAIN, prev_close_is_exchange_reference=True)
+        self.assertEqual(result.status, STATUS_OK)
+        self.assertEqual(result.upper, Decimal("11.00"))
+
+    def test_no_limit_stage_needs_no_flag(self) -> None:
+        result = compute_limit_prices("10.00", board=SZSE_GEM, listing_stage=LISTING_STAGE_NO_LIMIT)
+        self.assertEqual(result.status, STATUS_NO_LIMIT)
+
+
+class ExRightsToLimitsBoundaryTest(unittest.TestCase):
+    """D4：ex_rights 未通过门禁的结果，不得在 limits 侧变成可用涨跌停价。"""
+
+    def test_usable_reference_can_be_used(self) -> None:
+        fields = ExRightsFields(code="001225", transfer_per_10="4", event_type=EVENT_REGULAR)
+        verified = verify_ex_rights_reference(prev_close="50.92", fields=fields,
+                                              ex_bar_high="37.8", ex_bar_low="36.37",
+                                              limit_ratio=Decimal("0.10"), source_agreement=SOURCE_AGREE)
+        ref = usable_reference_prev_close(verified)
+        self.assertIsNotNone(ref)
+        result = compute_limit_prices(ref, board=SZSE_MAIN, prev_close_is_exchange_reference=True)
+        self.assertEqual(result.status, STATUS_OK)
+
+    def test_conflict_reference_stays_unknown(self) -> None:
+        fields = ExRightsFields(code="000908", transfer_per_10="10", event_type=EVENT_REGULAR)
+        conflict = verify_ex_rights_reference(prev_close="6.37", fields=fields,
+                                              ex_bar_high="4.58", ex_bar_low="4.58",
+                                              limit_ratio=Decimal("0.10"), source_agreement=SOURCE_AGREE)
+        self.assertIsNone(usable_reference_prev_close(conflict))
+        result = compute_limit_prices(None, board=SZSE_MAIN, prev_close_is_exchange_reference=True)
+        self.assertEqual(result.status, STATUS_UNKNOWN)
+        self.assertIsNone(result.upper)
 
 
 if __name__ == "__main__":

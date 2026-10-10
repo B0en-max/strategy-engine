@@ -255,7 +255,7 @@ def compute_limit_prices(
     board: str | None,
     is_st: bool = False,
     listing_stage: str = LISTING_STAGE_TRADING,
-    prev_close_is_exchange_reference: bool = True,
+    prev_close_is_exchange_reference: bool | None = None,
     tick: Decimal = DEFAULT_TICK,
 ) -> LimitPriceResult:
     """计算当日涨停价 / 跌停价。
@@ -266,9 +266,9 @@ def compute_limit_prices(
         is_st                           当日是否为 ST/*ST（**当日状态**，需要历史 ST 数据支撑）
         listing_stage                   'trading' | 'no_limit_days' | 'main_board_first_day'
         prev_close_is_exchange_reference
-                                        prev_close 是否为"交易所公布的参考前收盘价"。
-                                        用行情序列的前一根收盘时请传 False；一旦当日存在公司
-                                        行为，结果不可信（本函数会返回 unknown 而不是硬算）。
+                                        **fail-closed（必填语义）**：prev_close 是否为交易所公布的
+                                        参考前收盘价。**必须显式传 True 才会计算**；传 False 或留空
+                                        （None=未确认）一律返回 unknown，**不默认可信**。
 
     阶段语义
         no_limit_days        -> 无涨跌幅限制（返回 STATUS_NO_LIMIT，不给数字）
@@ -276,6 +276,9 @@ def compute_limit_prices(
                                 此时 prev_close 被解释为**发行价**（首日无前收盘价）
         trading              -> 常规/ST 对称比例
     """
+    if prev_close_is_exchange_reference is not None and not isinstance(prev_close_is_exchange_reference, bool):
+        raise ValueError("prev_close_is_exchange_reference 必须是 bool 或 None（None = 未确认，fail-closed）")
+
     if listing_stage == LISTING_STAGE_NO_LIMIT:
         return LimitPriceResult(STATUS_NO_LIMIT, None, None, None, BASIS_NO_LIMIT_NEW_LISTING)
     if listing_stage == LISTING_STAGE_MAIN_FIRST_DAY:
@@ -287,7 +290,13 @@ def compute_limit_prices(
     if ratio is None:
         return LimitPriceResult(STATUS_UNKNOWN, None, None, None, basis)
 
-    if not prev_close_is_exchange_reference:
+    if prev_close_is_exchange_reference is None:
+        return LimitPriceResult(
+            STATUS_UNKNOWN, None, None, ratio,
+            "未显式确认参考前收可信（fail-closed）：必须显式声明 prev_close_is_exchange_reference=True，"
+            "否则不给出涨跌停价",
+        )
+    if prev_close_is_exchange_reference is False:
         return LimitPriceResult(
             STATUS_UNKNOWN, None, None, ratio,
             "前收盘价不是交易所参考前收盘价（行情序列价格 / 除权除息日或有公司行为）；"
