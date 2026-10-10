@@ -466,11 +466,13 @@ class MainBoardStRatioVersionTest(unittest.TestCase):
             self.assertEqual(result.status, STATUS_UNKNOWN, board)
             self.assertIsNone(result.upper)
 
-    def test_szse_current_text_not_obtained_is_unknown_after_change(self) -> None:
-        # 深交所现行原文未取得 → 不得用上交所规则/行情替代
-        self.assertIsNone(resolve_limit_ratio(SZSE_MAIN, is_st=True, as_of="2026-07-06")[0])
-        # 变化之前仍为 5%（历史证据 + 现行行情一致）
-        self.assertEqual(resolve_limit_ratio(SZSE_MAIN, is_st=True, as_of="2026-01-01")[0], Decimal("0.05"))
+    def test_szse_after_change_is_10_percent(self) -> None:
+        # 深交所《交易规则（2026年修订）》（深证上〔2026〕551号，自 2026-07-06 施行）：主板风险警示 5% → 10%
+        self.assertEqual(resolve_limit_ratio(SZSE_MAIN, is_st=True, as_of="2026-07-06")[0], Decimal("0.10"))
+        self.assertEqual(resolve_limit_ratio(SZSE_MAIN, is_st=True, as_of="2026-07-05")[0], Decimal("0.05"))
+        self.assertEqual(resolve_limit_ratio(SZSE_MAIN, is_st=True, as_of="2026-09-30")[0], Decimal("0.10"))
+        # 创业板风险警示现行仍为 20%（现行 3.3.13 创业板一般比例）
+        self.assertEqual(resolve_limit_ratio(SZSE_GEM, is_st=True, as_of="2026-09-30")[0], Decimal("0.20"))
 
     def test_prices_after_change_sse(self) -> None:
         result = compute_limit_prices("10.00", board=SSE_MAIN, is_st=True, as_of="2026-07-06",

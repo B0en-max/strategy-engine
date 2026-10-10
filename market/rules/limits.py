@@ -113,11 +113,13 @@ NO_LIMIT_SESSIONS: Final[int] = 5
 #: 【规则依据·现行 official（沪）】上交所《交易规则（2026年修订）》：通知明确“自2026年7月6日起施行”，
 #:   起草说明“将主板风险警示股票价格涨跌幅限制比例由5%调整为10%，与主板其他股票保持一致”；
 #:   该调整**不在**暂缓实施清单（附件3，仅涉大宗交易）内。正式库行情也精确在 2026-07 出现 5%→10% 切换。
-#:【深交所】现行《交易规则》原文未取得（仅 2021/2023 版为历史证据）→ 2026-07-06 之后返回 unknown，
-#:   不以上交所规则或行情样本替代。
+#:【深交所·现行 official】《深圳证券交易所交易规则（2026年修订）》（深证上〔2026〕551号，2026-04-24 发布，
+#:   自 2026-07-06 施行；2023 版同时废止；无暂缓实施附件）修订说明：“整合主板风险警示股票涨跌幅比例限制
+#:   相关内容……将主板风险警示股票价格涨跌幅限制比例由5%调整为10%，与主板其他股票保持一致”；
+#:   现行正文 3.3.13 主板 10%、创业板 20%，4.5 节已无单独风险警示比例条款。
 MAIN_BOARD_ST_RATIO_EFFECTIVE_DATE: Final[str] = "2026-07-06"
 MAIN_BOARD_ST_RATIO_BEFORE: Final[Decimal] = Decimal("0.05")
-MAIN_BOARD_ST_RATIO_SSE_AFTER: Final[Decimal] = Decimal("0.10")
+MAIN_BOARD_ST_RATIO_AFTER: Final[Decimal] = Decimal("0.10")
 
 BASIS_NO_LIMIT_NEW_LISTING: Final[str] = "新上市无涨跌幅限制阶段（制度）"
 
@@ -179,14 +181,10 @@ def _resolve_main_board_st_ratio(board: str, as_of: str | None) -> tuple[Decimal
             f"{board} 主板风险警示股票 {MAIN_BOARD_ST_RATIO_BEFORE}"
             f"（{MAIN_BOARD_ST_RATIO_EFFECTIVE_DATE} 之前）"
         )
-    if board == SSE_MAIN:
-        return MAIN_BOARD_ST_RATIO_SSE_AFTER, (
-            f"{SSE_MAIN} 主板风险警示股票 {MAIN_BOARD_ST_RATIO_SSE_AFTER}"
-            f"（上交所《交易规则（2026年修订）》自 {MAIN_BOARD_ST_RATIO_EFFECTIVE_DATE} 施行）"
-        )
-    return None, (
-        f"{SZSE_MAIN} 主板风险警示股票比例：深交所现行《交易规则》原文未取得"
-        "（沪深同步调整、深市行情佐证为 10%），不得据此替代 → unknown"
+    return MAIN_BOARD_ST_RATIO_AFTER, (
+        f"{board} 主板风险警示股票 {MAIN_BOARD_ST_RATIO_AFTER}"
+        f"（沪深《交易规则（2026年修订）》均自 {MAIN_BOARD_ST_RATIO_EFFECTIVE_DATE} 施行："
+        "两所均将主板风险警示股票比例由 5% 调整为 10%，与主板其他股票一致）"
     )
 
 
