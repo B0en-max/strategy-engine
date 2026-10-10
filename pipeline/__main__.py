@@ -48,6 +48,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--quantity", type=float, default=100.0, help="每次成交数量（默认 100）")
     parser.add_argument("--fill-model", choices=list(FILL_MODELS), default=FILL_NEXT_OPEN,
                         help="成交模型（默认 t 决策、t+1 开盘成交）")
+    parser.add_argument("--warmup-bars", type=int, default=0,
+                        help="计分区间之前用于策略预热的 K 线根数（不计入绩效）")
+    parser.add_argument("--fill-beyond-end", action="store_true",
+                        help="允许区间末尾信号用「区间之后第一根」成交（默认不允许）")
     parser.add_argument("--commission-bps", type=float, default=2.5, help="佣金（bps，双边）")
     parser.add_argument("--min-commission", type=float, default=5.0, help="单笔最低佣金（元）")
     parser.add_argument("--stamp-tax-bps", type=float, default=5.0, help="印花税（bps，仅卖出）")
@@ -77,6 +81,8 @@ def main(argv: list[str] | None = None) -> int:
             slippage_bps=args.slippage_bps,
         ),
         fill_model=args.fill_model,
+        warmup_bars=args.warmup_bars,
+        fill_beyond_end=args.fill_beyond_end,
     )
     try:
         report = run_pipeline(spec, source_db_path=args.source_db, run_db_path=args.run_db)
@@ -101,9 +107,13 @@ def main(argv: list[str] | None = None) -> int:
             "signals_generated": payload["signals_generated"],
             "trades_executed": payload["trades_executed"],
             "unfilled_signals": payload["unfilled_signals"],
+            "input_fingerprint": payload["input_fingerprint"],
+            "result_fingerprint": payload["result_fingerprint"],
             "metrics": payload["metrics"],
             "cost_totals": payload["cost_totals"],
             "net_pnl": payload["net_pnl"],
+            "slippage_total": payload["slippage_total"],
+            "max_drawdown": payload["max_drawdown"],
             "warnings": payload["data"]["warnings"],
         },
         ensure_ascii=False,
