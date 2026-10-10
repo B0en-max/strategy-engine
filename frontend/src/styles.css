@@ -379,3 +379,355 @@ td.reason {
 .signal-detail table {
   font-size: 12px;
 }
+
+/* ---------------------------------------------------------------- 列表筛选（策略信号 / 已执行交易）*/
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 4px 0 6px;
+  padding: 6px 8px;
+  background: #fafbfc;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.filter-bar .checkbox {
+  color: #1f2328;
+}
+
+.record-kind {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.record-kind-signal {
+  background: #eaf2ff;
+  color: #1f6feb;
+}
+
+.record-kind-executed {
+  background: #eef1f5;
+  color: #57606a;
+}
+
+/* ---------------------------------------------------------------- 顶层工作区切换（Stage 20）*/
+.workspace-nav {
+  display: flex;
+  gap: 6px;
+  margin: 10px 0 12px;
+}
+
+.workspace-tab {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  color: #1f2328;
+}
+
+.workspace-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- 市场 / 选股（Stage 20 起；Stage 22 市场总览）*/
+.market-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* 面包屑：市场 > 板块 > 个股，点击可回退层级 */
+.market-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.crumb {
+  border: 0;
+  background: transparent;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.crumb:disabled {
+  color: #1f2328;
+  font-weight: 600;
+  cursor: default;
+}
+
+.crumb:not(:disabled):hover {
+  background: #f2f4f7;
+}
+
+.crumb-sep {
+  color: var(--muted);
+}
+
+.overview-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.search-input {
+  min-width: 200px;
+  padding: 4px 8px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+/* 行情摘要（上涨 / 下跌 / 平盘板块 + 最强 / 最弱板块）*/
+.market-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 8px 0;
+  padding: 8px 10px;
+  font-size: 13px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.summary-item b {
+  font-weight: 600;
+}
+
+.sector-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.sector-tab {
+  padding: 4px 10px;
+  font-size: 13px;
+  color: #1f2328;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.sector-tab.active {
+  color: #ffffff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.tab-count {
+  margin-left: 6px;
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+/* 板块热力图：每个板块一个独立 Tile */
+.sector-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.sector-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  font: inherit;
+  color: #1f2328;
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.sector-tile:hover {
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.08);
+}
+
+.tile-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.tile-change {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.tile-counts {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+}
+
+/* Tile 内的涨跌家数：与 A 股习惯一致（涨=红、跌=绿）*/
+.tile-up {
+  color: var(--short);
+}
+
+.tile-down {
+  color: var(--long);
+}
+
+.tile-flat,
+.tile-meta,
+.tile-empty-hint,
+.tile-scores {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 热力档位：低饱和度底色 + 描边，深浅随涨跌幅强度变化（不用刺眼纯色）*/
+.sector-tile-neutral {
+  background: var(--panel);
+  border-color: var(--border);
+}
+
+.sector-tile-up-1 {
+  background: #fdf2f1;
+  border-color: #f0cbc7;
+}
+
+.sector-tile-up-2 {
+  background: #fbe5e2;
+  border-color: #e8b0aa;
+}
+
+.sector-tile-up-3 {
+  background: #f7d3ce;
+  border-color: #dd9a92;
+}
+
+.sector-tile-up-4 {
+  background: #f2c0b9;
+  border-color: #cf8a80;
+}
+
+.sector-tile-down-1 {
+  background: #f1f8f2;
+  border-color: #c9e2cd;
+}
+
+.sector-tile-down-2 {
+  background: #e3f1e6;
+  border-color: #a9d5b0;
+}
+
+.sector-tile-down-3 {
+  background: #cfe7d4;
+  border-color: #8cc496;
+}
+
+.sector-tile-down-4 {
+  background: #bcdcc3;
+  border-color: #6fb27c;
+}
+
+.sector-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 6px 0 10px;
+  font-size: 13px;
+}
+
+/* 个股行情头部 */
+.quote-headline {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.quote-price {
+  font-size: 30px;
+  font-weight: 600;
+}
+
+.quote-change {
+  font-size: 16px;
+}
+
+.quote-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 10px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.quote-grid .kv dt {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.quote-grid .kv dd {
+  margin: 2px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.market-table-wrap {
+  max-height: 460px;
+}
+
+.sort-header {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.sort-header:hover {
+  color: var(--accent);
+}
+
+.sort-indicator {
+  font-size: 11px;
+}
+
+.tone-up {
+  color: var(--long);
+}
+
+.tone-down {
+  color: var(--short);
+}
+
+.market-kline-panel .chart-body {
+  height: 360px;
+}
+
+/* Stage 20 市场页遵循 A 股习惯：红涨绿跌（无数据不上色）。
+   只覆盖市场工作区 .market-workspace；执行器页面与 Stage 18 的 .tone-up/.tone-down 语义不变。 */
+.market-workspace .tone-up {
+  color: var(--short);
+}
+
+.market-workspace .tone-down {
+  color: var(--long);
+}

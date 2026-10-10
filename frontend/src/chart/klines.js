@@ -137,6 +137,22 @@ export function buildSignalMarkers(signals, candleTimes) {
   return { markers, matched: matched.length, unmatched }
 }
 
+/**
+ * 把信号按「是否落在当前 K 线上」拆分（按 timestamp 精确匹配）。
+ * 供统一派生层与数据一致性核对复用：onChart + offChart 恒等于输入总数（不重不漏）。
+ */
+export function splitByChart(signals, candleTimes) {
+  const times = candleTimes ?? new Set()
+  const onChart = []
+  const offChart = []
+  for (const signal of signals ?? []) {
+    const time = toChartTime(signal && signal.timestamp)
+    if (time !== null && times.has(time)) onChart.push(signal)
+    else offChart.push(signal)
+  }
+  return { onChart, offChart }
+}
+
 /** 时间戳 → 该 K 线上的信号列表（悬停 / 点击时展示详情）。 */
 export function groupSignalsByTime(signals, candleTimes) {
   const byTime = new Map()

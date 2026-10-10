@@ -20,6 +20,7 @@ import StrategyRunnerPanel from '../src/components/StrategyRunnerPanel.jsx'
 import TradesPanel from '../src/components/TradesPanel.jsx'
 import { formatNumber, formatTimestamp, indexById, symbolLabel } from '../src/format.js'
 import { toChartTime } from '../src/chart/klines.js'
+import { DEFAULT_SIGNAL_FILTERS } from '../src/filters/signals.js'
 
 const render = (element) => renderToStaticMarkup(element)
 const noop = () => {}
@@ -181,6 +182,121 @@ describe('SignalsPanel', () => {
   it('展示加载失败信息', () => {
     const html = render(<SignalsPanel {...baseProps} signals={[]} error="无法连接 API" />)
     expect(html).toContain('无法连接 API')
+  })
+})
+
+describe('SignalsPanel 筛选栏（策略信号 / 已执行交易）', () => {
+  const baseProps = {
+    symbolsById,
+    loading: false,
+    error: null,
+    autoRefresh: true,
+    lastUpdated: null,
+    selectedSignalId: null,
+    busySignalId: null,
+    onToggleAutoRefresh: noop,
+    onRefresh: noop,
+    onSelect: noop,
+    onExecute: noop,
+    onFilterChange: noop,
+  }
+
+  const rows = [
+    {
+      id: 1,
+      symbol_id: 1,
+      timeframe: '15m',
+      timestamp: '2026-09-02 09:45:00',
+      direction: 'long',
+      price: 1500.5,
+      reason: 'close 1499 -> 1500.5',
+      status: 'pending',
+    },
+    {
+      id: 2,
+      symbol_id: 1,
+      timeframe: '15m',
+      timestamp: '2026-09-02 10:00:00',
+      direction: 'short',
+      price: 1498.25,
+      reason: 'close 1500.5 -> 1498.25',
+      status: 'executed',
+    },
+  ]
+
+  it('渲染要求的 4 个开关，且默认只有「显示 Signals」勾选', () => {
+    const html = render(
+      <SignalsPanel {...baseProps} signals={rows} loadedCount={2} filteredCount={1} />,
+    )
+    expect(html).toContain('显示 Signals')
+    expect(html).toContain('只显示已执行')
+    expect(html).toContain('只显示 Long')
+    expect(html).toContain('只显示 Short')
+    expect(html).toMatch(/name="showSignals"[^>]*checked/)
+    expect(html).not.toMatch(/name="executedOnly"[^>]*checked/)
+    expect(html).not.toMatch(/name="longOnly"[^>]*checked/)
+    expect(html).not.toMatch(/name="shortOnly"[^>]*checked/)
+  })
+
+  it('显示条数、筛选后条数与当前筛选描述', () => {
+    const html = render(
+      <SignalsPanel {...baseProps} signals={rows.slice(0, 1)} loadedCount={2} filteredCount={1} />,
+    )
+    expect(html).toContain('显示 1 条')
+    expect(html).toContain('筛选后 1 / 已加载 2')
+    expect(html).toContain('当前筛选：仅策略信号（未执行） · 全部方向')
+  })
+
+  it('列表里能区分 Signal 与 Executed Trade（复用 status）', () => {
+    const html = render(<SignalsPanel {...baseProps} signals={rows} loadedCount={2} filteredCount={2} />)
+    expect(html).toContain('策略信号（未执行）')
+    expect(html).toContain('已执行交易')
+    expect(html).toContain('record-kind-signal')
+    expect(html).toContain('record-kind-executed')
+  })
+
+  it('提示里显示「不在当前 K 线范围」条数（与 K 线图口径一致）', () => {
+    const html = render(
+      <SignalsPanel
+        {...baseProps}
+        signals={rows}
+        loadedCount={3}
+        filteredCount={2}
+        offChartCount={1}
+      />,
+    )
+    expect(html).toContain('其中 1 条不在当前 K 线范围')
+    expect(html).toContain('本列表与上方 K 线图使用同一份筛选结果')
+  })
+
+  it('筛选后无结果显示明确的空状态（而不是空白区域）', () => {
+    const html = render(
+      <SignalsPanel {...baseProps} signals={[]} loadedCount={2} filteredCount={0} />,
+    )
+    expect(html).toContain('当前筛选条件下没有交易信号')
+    expect(html).not.toContain('暂无信号：选择策略与标的')
+  })
+
+  it('确实没有数据时显示原有的「暂无信号」提示', () => {
+    const html = render(
+      <SignalsPanel {...baseProps} signals={[]} loadedCount={0} filteredCount={0} />,
+    )
+    expect(html).toContain('暂无信号：选择策略与标的')
+  })
+
+  it('外部传入筛选状态时开关与描述同步（便于后续扩展条件）', () => {
+    const html = render(
+      <SignalsPanel
+        {...baseProps}
+        signals={[rows[1]]}
+        loadedCount={2}
+        filteredCount={1}
+        filters={{ ...DEFAULT_SIGNAL_FILTERS, executedOnly: true, longOnly: true }}
+      />,
+    )
+    expect(html).toMatch(/name="executedOnly"[^>]*checked/)
+    expect(html).toMatch(/name="longOnly"[^>]*checked/)
+    expect(html).toContain('当前筛选：仅已执行交易 · 仅 Long')
   })
 })
 
@@ -360,6 +476,29 @@ describe('KlineChartPanel（Stage 18）', () => {
     expect(html).toContain('不在当前 K 线范围 1 条')
     expect(html).toContain('chart-body')
     expect(html).toContain('刷新 K 线')
+  })
+
+  it('统计按传入的统一筛选结果显示（与日志同一口径）', () => {
+    const html = render(
+      <KlineChartPanel
+        {...chartProps}
+        summary={{ total: 1, pending: 0, executed: 1, long: 1, short: 0 }}
+        signals={[
+          {
+            id: 302,
+            timestamp: '2026-09-30 14:45:00',
+            direction: 'short',
+            price: 1258.62,
+            status: 'executed',
+            reason: 'r',
+          },
+        ]}
+      />,
+    )
+    expect(html).toContain('筛选后信号')
+    expect(html).toContain('未执行 0 · 已执行 1')
+    expect(html).toContain('Long 1')
+    expect(html).toContain('已落在图上')
   })
 
   it('无 K 线时给出空态提示', () => {

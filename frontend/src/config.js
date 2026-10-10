@@ -11,6 +11,10 @@ export const DEFAULT_API_BASE_URL = 'http://127.0.0.1:8000'
 /** 信号自动刷新间隔（毫秒） */
 export const SIGNALS_REFRESH_INTERVAL_MS = 10000
 
+/** 市场页默认行情周期与历史 K 线根数（与后端 /market/* 默认值一致） */
+export const MARKET_TIMEFRAME = '1d'
+export const MARKET_KLINE_LIMIT = 300
+
 /**
  * 读取 Vite 注入的环境变量。
  * 非 Vite 环境（例如测试里直接 import）拿不到 import.meta.env，返回 undefined。

@@ -155,3 +155,31 @@ export const listOrders = ({ symbolId, signalId, status, limit } = {}) =>
 
 export const listTrades = ({ symbolId, signalId, side, limit } = {}) =>
   request('/trades', { query: { symbol_id: symbolId, signal_id: signalId, side, limit } })
+
+// --------------------------------------------------------- 市场 / 选股（Stage 20）
+// 说明：display_code / 最新价 / 涨跌 全部由后端算好，前端只用返回值，不自行推导
+export const listMarketGroups = ({ groupType, market, activeOnly = true, timeframe = '1d' } = {}) =>
+  request('/market/groups', {
+    query: { group_type: groupType, market, active_only: activeOnly ? true : undefined, timeframe },
+  })
+
+export const listMarketSymbols = ({ groupId, market, activeOnly = true, timeframe = '1d' } = {}) =>
+  request('/market/symbols', {
+    query: {
+      group_id: groupId,
+      market,
+      active_only: activeOnly ? true : undefined,
+      timeframe,
+    },
+  })
+
+export const listMarketGroupSymbols = ({ groupId, activeOnly = true, timeframe = '1d' } = {}) =>
+  request(`/market/groups/${groupId}/symbols`, {
+    query: { active_only: activeOnly ? true : undefined, timeframe },
+  })
+
+export const getMarketSymbol = (symbolId, { timeframe = '1d' } = {}) =>
+  request(`/market/symbols/${symbolId}`, { query: { timeframe } })
+
+export const listMarketKlines = (symbolId, { timeframe = '1d', limit } = {}) =>
+  request(`/market/symbols/${symbolId}/klines`, { query: { timeframe, limit } })

@@ -14,8 +14,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 
 import * as api from './api/client.js'
-import { CHART_SIGNAL_LIMIT, DEFAULT_KLINE_LIMIT, buildCandles } from './chart/klines.js'
+import { CHART_SIGNAL_LIMIT, DEFAULT_KLINE_LIMIT, buildCandles, candleTimesOf, splitByChart } from './chart/klines.js'
 import { API_BASE_URL, SIGNALS_REFRESH_INTERVAL_MS } from './config.js'
+import { DEFAULT_SIGNAL_FILTERS, applySignalFilters, summarizeSignals } from './filters/signals.js'
 import { indexById } from './format.js'
 import ErrorBanner from './components/ErrorBanner.jsx'
 import ExecutionPanel from './components/ExecutionPanel.jsx'
@@ -26,6 +27,7 @@ import PositionsPanel from './components/PositionsPanel.jsx'
 import SignalsPanel from './components/SignalsPanel.jsx'
 import StrategyRunnerPanel from './components/StrategyRunnerPanel.jsx'
 import TradesPanel from './components/TradesPanel.jsx'
+import MarketPage from './components/market/MarketPage.jsx'
 
 /** 可选周期：与数据库现有 K 线一致（15m / 1d），后续接入更多周期时在这里补充 */
 export const TIMEFRAMES = ['15m', '1d']
@@ -62,6 +64,9 @@ export default function App() {
   })
   const [selectedSignalId, setSelectedSignalId] = useState(null)
 
+  // --- 列表筛选（区分「策略信号」与「已执行交易」）------------------------
+  const [signalsFilter, setSignalsFilter] = useState(DEFAULT_SIGNAL_FILTERS)
+
   // --- K 线（图表，Stage 18）-------------------------------------------
   const [klines, setKlines] = useState([])
   const [klinesState, setKlinesState] = useState({ loading: false, error: null })
@@ -77,6 +82,8 @@ export default function App() {
   const [orders, setOrders] = useState([])
   const [trades, setTrades] = useState([])
   const [recordsState, setRecordsState] = useState({ loading: false, error: null })
+  // 顶层工作区：executor = 策略执行（默认，保持原有行为）；market = 市场选股（Stage 20）
+  const [workspace, setWorkspace] = useState('executor')
 
   const symbolsById = useMemo(() => indexById(symbols), [symbols])
   const selectedSignal = useMemo(
@@ -85,8 +92,21 @@ export default function App() {
   )
   // K 线行 → 蜡烛数据（纯换算，见 chart/klines.js）
   const candles = useMemo(() => buildCandles(klines), [klines])
-  // 信号一次多取一些供图上叠加；表格仍只展示最近 RECENT_LIMIT 条（与 Stage 17 一致）
-  const tableSignals = useMemo(() => signals.slice(-RECENT_LIMIT), [signals])
+  // ---- 统一的 Signal / Trade 派生层（K 线图与交易日志共用同一份结果）----
+  //   已加载 signals → applySignalFilters（唯一筛选逻辑）→ filteredSignals
+  //        ├── K 线图：filteredSignals（按 timestamp 落到对应 K 线上）
+  //        └── 交易日志：filteredSignals（同一个数组，不各自维护一套、也不各自筛选）
+  const filteredSignals = useMemo(
+    () => applySignalFilters(signals, signalsFilter),
+    [signals, signalsFilter],
+  )
+  // 供一致性核对：筛选结果里哪些落在当前 K 线上（onChart + offChart === filteredSignals.length）
+  const chartMatches = useMemo(
+    () => splitByChart(filteredSignals, candleTimesOf(candles)),
+    [filteredSignals, candles],
+  )
+  // K 线图与日志共用同一份统计口径（避免两处各算一遍得出不一致的数字）
+  const signalSummary = useMemo(() => summarizeSignals(filteredSignals), [filteredSignals])
 
   // ------------------------------------------------------------------ 加载
   const checkHealth = useCallback(async () => {
@@ -238,6 +258,10 @@ export default function App() {
     setSelectedSignalId(signal.id)
   }, [])
 
+  const handleFilterChange = useCallback((key, value) => {
+    setSignalsFilter((previous) => ({ ...previous, [key]: value }))
+  }, [])
+
   const handleExecute = useCallback(
     async (signal = selectedSignal) => {
       if (!signal) return
@@ -287,6 +311,23 @@ export default function App() {
         </p>
       </header>
 
+      <nav className="workspace-nav">
+        <button
+          type="button"
+          className={workspace === 'executor' ? 'workspace-tab active' : 'workspace-tab'}
+          onClick={() => setWorkspace('executor')}
+        >
+          策略执行
+        </button>
+        <button
+          type="button"
+          className={workspace === 'market' ? 'workspace-tab active' : 'workspace-tab'}
+          onClick={() => setWorkspace('market')}
+        >
+          市场选股
+        </button>
+      </nav>
+
       <HealthBar
         baseUrl={API_BASE_URL}
         state={health.state}
@@ -295,15 +336,18 @@ export default function App() {
         onRetry={checkHealth}
       />
 
-      <ErrorBanner
-        message={loadError}
-        title="加载策略 / 标的失败"
-        onDismiss={() => setLoadError(null)}
-      />
+      {workspace === 'executor' ? (
+        <>
+          <ErrorBanner
+            message={loadError}
+            title="加载策略 / 标的失败"
+            onDismiss={() => setLoadError(null)}
+          />
 
       <KlineChartPanel
         candles={candles}
-        signals={signals}
+        signals={filteredSignals}
+        summary={signalSummary}
         symbolsById={symbolsById}
         symbolId={form.symbolId ? Number(form.symbolId) : null}
         timeframe={form.timeframe}
@@ -343,7 +387,7 @@ export default function App() {
 
         <div className="column column-middle">
           <SignalsPanel
-            signals={tableSignals}
+            signals={filteredSignals}
             symbolsById={symbolsById}
             loading={signalsState.loading}
             error={signalsState.error}
@@ -351,6 +395,11 @@ export default function App() {
             lastUpdated={signalsState.lastUpdated}
             selectedSignalId={selectedSignalId}
             busySignalId={busySignalId}
+            filters={signalsFilter}
+            onFilterChange={handleFilterChange}
+            loadedCount={signals.length}
+            filteredCount={filteredSignals.length}
+            offChartCount={chartMatches.offChart.length}
             onToggleAutoRefresh={() =>
               setSignalsState((previous) => ({ ...previous, autoRefresh: !previous.autoRefresh }))
             }
@@ -390,6 +439,10 @@ export default function App() {
           onRefresh={loadRecords}
         />
       </div>
+        </>
+      ) : (
+        <MarketPage />
+      )}
     </div>
   )
 }

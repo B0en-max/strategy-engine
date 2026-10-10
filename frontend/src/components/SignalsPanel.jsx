@@ -1,4 +1,12 @@
 import React from 'react'
+
+import {
+  DEFAULT_SIGNAL_FILTERS,
+  RECORD_KIND_LABEL,
+  SIGNAL_FILTER_OPTIONS,
+  describeFilters,
+  recordKind,
+} from '../filters/signals.js'
 import { formatNumber, symbolLabel } from '../format.js'
 
 /**
@@ -20,6 +28,11 @@ export default function SignalsPanel({
   onRefresh,
   onSelect,
   onExecute,
+  filters = DEFAULT_SIGNAL_FILTERS,
+  onFilterChange,
+  loadedCount,
+  filteredCount,
+  offChartCount,
 }) {
   return (
     <section className="panel panel-wide">
@@ -36,9 +49,33 @@ export default function SignalsPanel({
         </div>
       </div>
 
+      <div className="filter-bar">
+        {SIGNAL_FILTER_OPTIONS.map((option) => (
+          <label key={option.key} className="checkbox">
+            <input
+              type="checkbox"
+              name={option.key}
+              checked={Boolean(filters[option.key])}
+              onChange={(event) => onFilterChange(option.key, event.target.checked)}
+            />
+            <span>{option.label}</span>
+          </label>
+        ))}
+      </div>
+
       <p className="hint">
-        共 {signals.length} 条{lastUpdated ? ` · 最近刷新：${lastUpdated}` : ''}
+        显示 {signals.length} 条
+        {typeof loadedCount === 'number'
+          ? `（筛选后 ${filteredCount} / 已加载 ${loadedCount}）`
+          : ''}
+        {typeof offChartCount === 'number' && offChartCount > 0
+          ? ` · 其中 ${offChartCount} 条不在当前 K 线范围（可放宽时间范围）`
+          : ''}
+        {lastUpdated ? ` · 最近刷新：${lastUpdated}` : ''}
         {selectedSignalId ? ` · 已选中信号 #${selectedSignalId}` : ''}
+        <br />
+        {describeFilters(filters)}
+        　本列表与上方 K 线图使用同一份筛选结果
       </p>
 
       {error ? <p className="error-text">{error}</p> : null}
@@ -61,7 +98,9 @@ export default function SignalsPanel({
             {signals.length === 0 ? (
               <tr>
                 <td colSpan={8} className="empty">
-                  暂无信号：选择策略与标的，点击「运行策略」后这里会出现新信号。
+                  {filteredCount === 0 && loadedCount > 0
+                    ? '当前筛选条件下没有交易信号（可调整上方开关查看其它记录）。'
+                    : '暂无信号：选择策略与标的，点击「运行策略」后这里会出现新信号。'}
                 </td>
               </tr>
             ) : (
@@ -80,7 +119,12 @@ export default function SignalsPanel({
                       {signal.direction}
                     </td>
                     <td className="num">{formatNumber(signal.price)}</td>
-                    <td>{signal.status}</td>
+                    <td>
+                      <span className={`record-kind record-kind-${recordKind(signal)}`}>
+                        {signal.status}
+                      </span>
+                      <span className="hint"> {RECORD_KIND_LABEL[recordKind(signal)]}</span>
+                    </td>
                     <td className="reason">{signal.reason ?? '-'}</td>
                     <td>
                       {signal.status === 'pending' ? (

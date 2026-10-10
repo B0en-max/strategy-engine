@@ -18,6 +18,7 @@ import {
   markerColor,
   markerPosition,
   markerShape,
+  splitByChart,
   toChartTime,
 } from '../src/chart/klines.js'
 
@@ -167,6 +168,36 @@ describe('buildSignalMarkers（必须按 timestamp 匹配，不能按数组下�
     expect(markers).toEqual([])
     expect(matched).toBe(0)
     expect(unmatched).toBe(4)
+  })
+})
+
+describe('splitByChart（K 线图与日志共用的一致性核对）', () => {
+  const candles = buildCandles(REAL_15M_ROWS)
+  const times = candleTimesOf(candles)
+  const rows = [
+    { id: 1, timestamp: '2026-09-30 14:15:00' },
+    { id: 2, timestamp: '2026-09-30 14:45:00' },
+    { id: 3, timestamp: '2026-09-01 09:30:00' },
+    { id: 4, timestamp: 'bad' },
+  ]
+
+  it('按 timestamp 拆成「图上」与「不在当前 K 线范围」', () => {
+    const { onChart, offChart } = splitByChart(rows, times)
+    expect(onChart.map((row) => row.id)).toEqual([1, 2])
+    expect(offChart.map((row) => row.id)).toEqual([3, 4])
+  })
+
+  it('不重不漏：onChart + offChart 恒等于输入总数', () => {
+    const { onChart, offChart } = splitByChart(rows, times)
+    expect(onChart.length + offChart.length).toBe(rows.length)
+    const ids = [...onChart, ...offChart].map((row) => row.id).sort()
+    expect(ids).toEqual([1, 2, 3, 4])
+  })
+
+  it('空输入 / 无 K 线时全部计入「不在图上」', () => {
+    expect(splitByChart(null, times).onChart).toEqual([])
+    expect(splitByChart(rows, new Set()).offChart).toHaveLength(4)
+    expect(splitByChart(rows, new Set()).onChart).toEqual([])
   })
 })
 

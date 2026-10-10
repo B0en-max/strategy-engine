@@ -31,6 +31,7 @@ const DOWN_COLOR = '#b42318'
 export default function KlineChartPanel({
   candles,
   signals,
+  summary,
   symbolsById,
   symbolId,
   timeframe,
@@ -50,6 +51,14 @@ export default function KlineChartPanel({
   const [focusTime, setFocusTime] = useState(null)
 
   const candleTimes = useMemo(() => candleTimesOf(candles), [candles])
+  // 统计口径由 App 统一给出（filteredSignals 的汇总），没传时退化为「全部当作未执行」
+  const stats = summary ?? {
+    total: signals.length,
+    pending: signals.length,
+    executed: 0,
+    long: 0,
+    short: 0,
+  }
   const { markers, matched, unmatched } = useMemo(
     () => buildSignalMarkers(signals, candleTimes),
     [signals, candleTimes],
@@ -219,7 +228,8 @@ export default function KlineChartPanel({
           <span className="hint">{loading ? '加载中…' : '暂无数据'}</span>
         )}
         <span className="hint chart-stats">
-          信号 {signals.length} 条：已落在图上 <b>{matched}</b> 条
+          筛选后信号 <b>{stats.total}</b> 条（未执行 {stats.pending} · 已执行 {stats.executed} · Long{' '}
+          {stats.long} / Short {stats.short}）：已落在图上 <b>{matched}</b> 条
           {unmatched > 0 ? ` · 不在当前 K 线范围 ${unmatched} 条` : ''}
           {markers.length > 0 ? '（标记：↑绿=long / ↓红=short；实色=待执行，浅色带 ✓=已执行）' : ''}
         </span>
