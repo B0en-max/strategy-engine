@@ -27,7 +27,9 @@ from database import KlineRepository, SymbolRepository, initialize_database  # n
 from market.rules import (  # noqa: E402
     BSE,
     BOARD_LIMIT_RATIOS,
+    LISTING_STAGE_MAIN_FIRST_DAY,
     LISTING_STAGE_NO_LIMIT,
+    LISTING_STAGE_TRADING,
     SSE_MAIN,
     SSE_STAR,
     STATUS_NO_LIMIT,
@@ -38,6 +40,7 @@ from market.rules import (  # noqa: E402
     classify_bar_against_limits,
     compute_limit_prices,
     resolve_limit_ratio,
+    resolve_listing_stage,
     resolve_prev_close,
     round_to_tick,
 )
@@ -153,6 +156,89 @@ class LimitPriceTest(unittest.TestCase):
         result = compute_limit_prices("10.00", board=None)
         self.assertEqual(result.status, STATUS_UNKNOWN)
         self.assertIsNone(result.upper)
+
+    def test_main_board_first_day_is_asymmetric(self) -> None:
+        result = compute_limit_prices("10.00", board=SSE_MAIN, listing_stage=LISTING_STAGE_MAIN_FIRST_DAY)
+        self.assertEqual(result.status, STATUS_OK)
+        self.assertEqual(result.upper, Decimal("14.40"))  # +44%
+        self.assertEqual(result.lower, Decimal("6.40"))   # −36%
+        self.assertIsNone(result.ratio)                    # 非对称：无单一比例
+        self.assertEqual(result.upper_ratio, Decimal("0.44"))
+        self.assertEqual(result.lower_ratio, Decimal("0.36"))
+        # 深市主板同规则（发行价 4.39 → 上限 6.32）
+        self.assertEqual(
+            compute_limit_prices("4.39", board=SZSE_MAIN, listing_stage=LISTING_STAGE_MAIN_FIRST_DAY).upper,
+            Decimal("6.32"),
+        )
+
+    def test_main_board_first_day_rejects_non_main_board(self) -> None:
+        for board in (SZSE_GEM, SSE_STAR, BSE):
+            result = compute_limit_prices("10.00", board=board, listing_stage=LISTING_STAGE_MAIN_FIRST_DAY)
+            self.assertEqual(result.status, STATUS_UNKNOWN, board)
+            self.assertIsNone(result.upper)
+
+    def test_main_board_first_day_invalid_issue_price(self) -> None:
+        for value in (None, 0, -1, "abc"):
+            result = compute_limit_prices(value, board=SSE_MAIN, listing_stage=LISTING_STAGE_MAIN_FIRST_DAY)
+            self.assertEqual(result.status, STATUS_UNKNOWN, f"value={value!r}")
+            self.assertIsNone(result.upper)
+
+
+class ListingStageTest(unittest.TestCase):
+    """阶段判定：信息不足一律 None（unknown），不得凭经验补齐。"""
+
+    def test_gem_and_star_first_five_sessions(self) -> None:
+        for board in (SZSE_GEM, SSE_STAR):
+            for k in range(5):
+                self.assertEqual(resolve_listing_stage(board, sessions_since_listing=k)[0],
+                                 LISTING_STAGE_NO_LIMIT, f"{board} k={k}")
+            self.assertEqual(resolve_listing_stage(board, sessions_since_listing=5)[0], LISTING_STAGE_TRADING)
+
+    def test_bse_first_day_only(self) -> None:
+        self.assertEqual(resolve_listing_stage(BSE, sessions_since_listing=0)[0], LISTING_STAGE_NO_LIMIT)
+        self.assertEqual(resolve_listing_stage(BSE, sessions_since_listing=1)[0], LISTING_STAGE_TRADING)
+
+    def test_main_board_requires_listing_date(self) -> None:
+        stage, basis = resolve_listing_stage(SSE_MAIN, sessions_since_listing=0)
+        self.assertIsNone(stage)
+        self.assertIn("上市日期", basis)
+
+    def test_main_board_pre_2023_04_10_first_day_asymmetric(self) -> None:
+        stage, _ = resolve_listing_stage(SSE_MAIN, sessions_since_listing=0, listing_date="2022-06-01")
+        self.assertEqual(stage, LISTING_STAGE_MAIN_FIRST_DAY)
+        self.assertEqual(
+            resolve_listing_stage(SSE_MAIN, sessions_since_listing=1, listing_date="2022-06-01")[0],
+            LISTING_STAGE_TRADING,
+        )
+
+    def test_main_board_post_2023_04_10_first_five_no_limit(self) -> None:
+        for k in range(5):
+            self.assertEqual(
+                resolve_listing_stage(SZSE_MAIN, sessions_since_listing=k, listing_date="2025-01-15")[0],
+                LISTING_STAGE_NO_LIMIT, f"k={k}",
+            )
+        self.assertEqual(
+            resolve_listing_stage(SZSE_MAIN, sessions_since_listing=5, listing_date="2025-01-15")[0],
+            LISTING_STAGE_TRADING,
+        )
+        # 边界：恰在 2023-04-10 上市 → 按注册制（前 5 日无限制）
+        self.assertEqual(
+            resolve_listing_stage(SSE_MAIN, sessions_since_listing=0, listing_date="2023-04-10")[0],
+            LISTING_STAGE_NO_LIMIT,
+        )
+
+    def test_unknown_inputs_return_none(self) -> None:
+        self.assertIsNone(resolve_listing_stage(None, sessions_since_listing=0)[0])
+        self.assertIsNone(resolve_listing_stage("NASDAQ", sessions_since_listing=0)[0])
+        self.assertIsNone(resolve_listing_stage(SSE_MAIN, sessions_since_listing=None)[0])
+        self.assertIsNone(resolve_listing_stage(SSE_MAIN, sessions_since_listing=-1)[0])
+
+    def test_empirical_consistency_2026_main_board_ipo(self) -> None:
+        # 正式库实测：601091（2026-09-17 上市）首日至第 5 日无限制、第 6 日起 ±10%
+        self.assertEqual(
+            resolve_listing_stage(SSE_MAIN, sessions_since_listing=0, listing_date="2026-09-17")[0],
+            LISTING_STAGE_NO_LIMIT,
+        )
 
 
 class PrevCloseTest(unittest.TestCase):
