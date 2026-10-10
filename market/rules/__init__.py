@@ -1,8 +1,9 @@
 """A 股交易规则基础层（Stage 027′ Data Foundation）。
 
-本层只做两件事：
-    - `contract`：最简数据契约（时间/价格/缺失/股票池/涨跌停输入）
-    - `limits`  ：涨跌停价判定与 K 线对照（纯函数、无 IO）
+本层做三件事（均为纯函数、无 IO）：
+    - `contract`  ：最简数据契约（时间/价格/缺失/股票池/涨跌停输入）
+    - `limits`    ：涨跌停价判定与 K 线对照
+    - `st_history`：风险警示（ST/*ST）实施/撤销事件解析（取自巨潮公告正文）
 
 明确不属于本层：打板策略、晋级率统计、数据抓取、数据库读写。
 """
@@ -50,6 +51,19 @@ from .limits import (
     resolve_prev_close,
     round_to_tick,
 )
+from .st_history import (
+    EVENT_IMPLEMENT,
+    EVENT_REVOKE,
+    SCOPE_DELISTING,
+    SCOPE_OTHER,
+    SCOPE_UNKNOWN,
+    AnnouncementParseError,
+    RiskWarningEvent,
+    StInterval,
+    build_st_intervals,
+    extract_text_from_pdf,
+    parse_risk_warning_event,
+)
 
 __all__ = [
     "BASIS_NO_LIMIT_NEW_LISTING",
@@ -91,4 +105,15 @@ __all__ = [
     "resolve_listing_stage",
     "resolve_prev_close",
     "round_to_tick",
+    "AnnouncementParseError",
+    "RiskWarningEvent",
+    "StInterval",
+    "build_st_intervals",
+    "extract_text_from_pdf",
+    "parse_risk_warning_event",
+    "EVENT_IMPLEMENT",
+    "EVENT_REVOKE",
+    "SCOPE_DELISTING",
+    "SCOPE_OTHER",
+    "SCOPE_UNKNOWN",
 ]
