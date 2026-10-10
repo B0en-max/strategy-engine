@@ -20,11 +20,15 @@ from market.rules.st_history import (  # noqa: E402
     EVENT_REVOKE,
     SCOPE_DELISTING,
     SCOPE_OTHER,
+    STATUS_ACTIVE,
+    STATUS_INACTIVE,
+    STATUS_UNKNOWN,
     AnnouncementParseError,
     RiskWarningEvent,
     build_st_intervals,
     extract_text_from_pdf,
     parse_risk_warning_event,
+    query_risk_warning_status,
 )
 
 FIXTURES = PROJECT_ROOT / "tests" / "fixtures" / "st_notices"
@@ -244,6 +248,136 @@ class BuildIntervalsTest(unittest.TestCase):
         ev = RiskWarningEvent(kind=EVENT_IMPLEMENT, scope=SCOPE_DELISTING, effective_date=None,
                               suspension_date=None, resume_date=None, title="t", basis="b")
         self.assertEqual(build_st_intervals([ev]), ())
+
+
+class ContinuesParseTest(unittest.TestCase):
+    def test_600238_captures_continues_other(self) -> None:
+        # "撤销退市风险警示并继续被实施其他风险警示" → 必须同时表达"其他链继续生效"
+        ev = parse_risk_warning_event(
+            title="关于撤销退市风险警示及继续被实施其他风险警示暨停牌的公告",
+            text=load_fixture("600238_revoke_delisting_and_other.txt"),
+        )
+        assert ev is not None
+        self.assertEqual(ev.kind, EVENT_REVOKE)
+        self.assertEqual(ev.scope, SCOPE_DELISTING)
+        self.assertEqual(ev.continues, (SCOPE_OTHER,))
+
+    def test_plain_revoke_has_no_continues(self) -> None:
+        ev = parse_risk_warning_event(
+            title="关于公司股票交易撤销退市风险警示暨停牌的公告",
+            text=load_fixture("300211_revoke_delisting.txt"),
+        )
+        assert ev is not None
+        self.assertEqual(ev.continues, ())
+
+
+def _ev(kind: str, scope: str, date: str, continues: tuple[str, ...] = ()) -> RiskWarningEvent:
+    return RiskWarningEvent(kind=kind, scope=scope, effective_date=date, suspension_date=None,
+                            resume_date=None, title="t", basis="b", continues=tuple(continues))
+
+
+def _status(events, date: str) -> dict:
+    return {s.scope: s for s in query_risk_warning_status(events, date=date)}
+
+
+class StateQueryTest(unittest.TestCase):
+    def test_both_scopes_always_returned(self) -> None:
+        out = query_risk_warning_status([], date="2026-01-01")
+        self.assertEqual({s.scope for s in out}, {SCOPE_DELISTING, SCOPE_OTHER})
+
+    def test_revoke_delisting_and_continue_other(self) -> None:
+        events = [
+            _ev(EVENT_IMPLEMENT, SCOPE_DELISTING, "2025-04-30"),
+            _ev(EVENT_REVOKE, SCOPE_DELISTING, "2026-08-03", continues=(SCOPE_OTHER,)),
+        ]
+        s = _status(events, "2026-07-30")
+        self.assertEqual(s[SCOPE_DELISTING].status, STATUS_ACTIVE)
+        self.assertTrue(s[SCOPE_DELISTING].complete)
+        s = _status(events, "2026-08-03")
+        self.assertEqual(s[SCOPE_DELISTING].status, STATUS_INACTIVE)
+        self.assertTrue(s[SCOPE_DELISTING].complete)
+        # 撤销退市之日"其他"仍在实施 → ACTIVE；绝不能因撤销退市而判 INACTIVE
+        s = _status(events, "2026-08-04")
+        self.assertEqual(s[SCOPE_OTHER].status, STATUS_ACTIVE)
+        self.assertFalse(s[SCOPE_OTHER].complete)  # 起点未知
+        # 继续声明之前：未知（不是非 ST）
+        self.assertEqual(_status(events, "2026-07-01")[SCOPE_OTHER].status, STATUS_UNKNOWN)
+
+    def test_implement_and_revoke_other_scope(self) -> None:
+        events = [_ev(EVENT_IMPLEMENT, SCOPE_OTHER, "2025-05-06"),
+                  _ev(EVENT_REVOKE, SCOPE_OTHER, "2026-09-30")]
+        self.assertEqual(_status(events, "2026-09-29")[SCOPE_OTHER].status, STATUS_ACTIVE)
+        s = _status(events, "2026-09-30")[SCOPE_OTHER]
+        self.assertEqual(s.status, STATUS_INACTIVE)
+        self.assertTrue(s.complete)
+        # 另一类（退市）无记录 → 未知，不得默认非 ST
+        self.assertEqual(_status(events, "2026-09-30")[SCOPE_DELISTING].status, STATUS_UNKNOWN)
+
+    def test_boundaries_of_confirmed_chain(self) -> None:
+        events = [_ev(EVENT_IMPLEMENT, SCOPE_DELISTING, "2025-04-30"),
+                  _ev(EVENT_REVOKE, SCOPE_DELISTING, "2026-08-03")]
+        self.assertEqual(_status(events, "2025-04-29")[SCOPE_DELISTING].status, STATUS_UNKNOWN)
+        self.assertEqual(_status(events, "2025-04-30")[SCOPE_DELISTING].status, STATUS_ACTIVE)
+        self.assertEqual(_status(events, "2026-08-02")[SCOPE_DELISTING].status, STATUS_ACTIVE)
+        self.assertEqual(_status(events, "2026-08-03")[SCOPE_DELISTING].status, STATUS_INACTIVE)
+
+    def test_missing_implement_is_unknown_not_inactive(self) -> None:
+        events = [_ev(EVENT_REVOKE, SCOPE_DELISTING, "2026-08-03")]
+        s = _status(events, "2026-08-04")[SCOPE_DELISTING]
+        self.assertEqual(s.status, STATUS_UNKNOWN)
+        self.assertFalse(s.complete)
+
+    def test_missing_revoke_is_active(self) -> None:
+        events = [_ev(EVENT_IMPLEMENT, SCOPE_DELISTING, "2025-04-30")]
+        self.assertEqual(_status(events, "2026-01-01")[SCOPE_DELISTING].status, STATUS_ACTIVE)
+
+    def test_same_day_conflict_is_unknown(self) -> None:
+        events = [_ev(EVENT_IMPLEMENT, SCOPE_DELISTING, "2026-08-03"),
+                  _ev(EVENT_REVOKE, SCOPE_DELISTING, "2026-08-03")]
+        self.assertEqual(_status(events, "2026-08-03")[SCOPE_DELISTING].status, STATUS_UNKNOWN)
+
+    def test_duplicate_announcement_deduped(self) -> None:
+        events = [_ev(EVENT_IMPLEMENT, SCOPE_DELISTING, "2025-04-30"),
+                  _ev(EVENT_IMPLEMENT, SCOPE_DELISTING, "2025-04-30"),
+                  _ev(EVENT_REVOKE, SCOPE_DELISTING, "2026-08-03")]
+        s = _status(events, "2025-05-01")[SCOPE_DELISTING]
+        self.assertEqual(s.status, STATUS_ACTIVE)
+        self.assertTrue(s.complete)
+
+    def test_order_independent(self) -> None:
+        a = [_ev(EVENT_IMPLEMENT, SCOPE_DELISTING, "2025-04-30"),
+             _ev(EVENT_REVOKE, SCOPE_DELISTING, "2026-08-03")]
+        b = list(reversed(a))
+        for d in ("2025-04-30", "2026-08-02", "2026-08-03"):
+            self.assertEqual(_status(a, d), _status(b, d), d)
+        self.assertEqual(build_st_intervals(a), build_st_intervals(b))
+
+
+class BuildIntervalsEdgeTest(unittest.TestCase):
+    def test_duplicate_implement_no_spurious_interval(self) -> None:
+        events = [_ev(EVENT_IMPLEMENT, SCOPE_DELISTING, "2025-04-30"),
+                  _ev(EVENT_IMPLEMENT, SCOPE_DELISTING, "2025-04-30"),
+                  _ev(EVENT_REVOKE, SCOPE_DELISTING, "2026-08-03")]
+        intervals = build_st_intervals(events)
+        self.assertEqual(len(intervals), 1)
+        self.assertTrue(intervals[0].complete)
+        self.assertEqual((intervals[0].start_date, intervals[0].end_date), ("2025-04-30", "2026-08-03"))
+
+    def test_same_day_conflict_flagged_not_paired(self) -> None:
+        events = [_ev(EVENT_IMPLEMENT, SCOPE_DELISTING, "2026-08-03"),
+                  _ev(EVENT_REVOKE, SCOPE_DELISTING, "2026-08-03")]
+        intervals = build_st_intervals(events)
+        self.assertEqual(len(intervals), 1)
+        self.assertFalse(intervals[0].complete)
+        self.assertIsNone(intervals[0].start_date)
+        self.assertIsNone(intervals[0].end_date)
+
+    def test_two_scopes_are_independent(self) -> None:
+        events = [_ev(EVENT_IMPLEMENT, SCOPE_DELISTING, "2025-04-30"),
+                  _ev(EVENT_REVOKE, SCOPE_DELISTING, "2026-08-03"),
+                  _ev(EVENT_IMPLEMENT, SCOPE_OTHER, "2026-08-03")]
+        intervals = build_st_intervals(events)
+        self.assertEqual({i.scope for i in intervals}, {SCOPE_DELISTING, SCOPE_OTHER})
 
 
 if __name__ == "__main__":

@@ -1,12 +1,12 @@
-"""历史风险警示（ST/*ST）事件解析（Stage 027′-C1）。
+"""历史风险警示（ST/*ST）事件解析与状态查询（Stage 027′-C1/C2）。
 
 目标
 ------------------------------------------------------------------
 把**巨潮资讯网公告**（交易所指定信息披露平台）还原成结构化的风险警示事件，
-为后续"历史涨跌停判定"提供可信的 ST 生效区间。
+并据此在**不猜**的前提下回答"某交易日某类风险警示是否生效"。
 
-本模块只做**解析**（纯函数：文本/字节进，结构出）：不联网、不连数据库、不改 schema。
-公告的检索与下载由调用方完成（见 README/verify 中的查询流程）。
+本模块只做**解析与判定**（纯函数：文本/字节或事件进，结构出）：不联网、不连数据库、不改 schema。
+公告的检索与下载由调用方完成（见 verify 中的查询流程）。
 
 铁律（与项目"不猜数据"约定一致）
 ------------------------------------------------------------------
@@ -14,12 +14,20 @@
     - 生效日期**只取自公告正文**的明确表述；正文无法确认时字段为 None（unknown），
       **绝不返回"看似有效"的默认日期**；
     - **不得**用 K 线涨跌幅反推 ST 日期；也**不得**把当前证券简称当作历史 ST 状态；
+    - 事件链不完整或冲突时，状态查询返回 `unknown`（**绝不默认"非 ST"**）；
     - 解析失败（无正文 / 结构无法识别）显式返回 None 或抛 AnnouncementParseError。
+
+两类风险警示必须独立表达
+------------------------------------------------------------------
+    退市风险警示（*ST，SCOPE_DELISTING）与其他风险警示（ST，SCOPE_OTHER）是**两条独立链**，
+    各自有 实施/撤销。**撤销一种不得影响另一种**：公告"撤销退市风险警示并继续被实施其他
+    风险警示"要同时表达"退市链撤销"与"其他链继续生效"（用 RiskWarningEvent.continues 记录）。
 
 已验证样本（正文均含结构化"起始日"字段；来源：巨潮资讯网）
 ------------------------------------------------------------------
     600053 沪市主板 实施退市风险警示  停牌 2026-04-29 / 实施 2026-04-30
-    600238 沪市主板 撤销退市风险警示  停牌 2026-07-31 / 撤销 2026-08-03（并继续其他）
+    688033 科创板   实施退市风险警示  停牌 2026-04-30 / 实施 2026-05-06
+    600238 沪市主板 撤销退市风险警示  停牌 2026-07-31 / 撤销 2026-08-03（并继续其他风险警示）
     000820 深市主板 撤销退市风险警示  停牌 2026-07-29 / 撤销 2026-07-30
     300211 创业板   撤销退市风险警示  停牌 2026-09-28 / 撤销 2026-09-29
     300527 创业板   撤销其他风险警示  停牌 2026-09-29 / 撤销 2026-09-30
@@ -28,7 +36,8 @@
 ------------------------------------------------------------------
     - 只处理**文本型 PDF**（含 ToUnicode 映射）；扫描/图片型 PDF 一律抛错，不猜；
     - 公告措辞存在版本差异，规则基于已验证样本，覆盖不到时返回 None；
-    - 事件**完整性**无法保证（历史/更早公告可能未入库或不可解析）→ 区间构造会显式标注不完整。
+    - 事件**完整性**无法保证（历史/更早公告可能未入库或不可解析）→ 状态查询会显式标注
+      `complete=False` 或返回 `unknown`，区间构造同样标注不完整。
 """
 
 from __future__ import annotations
@@ -46,6 +55,14 @@ EVENT_REVOKE: Final[str] = "revoke"         # 撤销风险警示
 SCOPE_DELISTING: Final[str] = "delisting_risk"  # 退市风险警示（*ST）
 SCOPE_OTHER: Final[str] = "other_risk"          # 其他风险警示（ST）
 SCOPE_UNKNOWN: Final[str] = "unknown"
+
+#: 状态查询结果
+STATUS_ACTIVE: Final[str] = "active"        # 该日该类风险警示生效
+STATUS_INACTIVE: Final[str] = "inactive"    # 该日该类风险警示已撤销
+STATUS_UNKNOWN: Final[str] = "unknown"      # 无法判定（链不完整/冲突/无记录）
+
+#: 内部动作（状态机用）：某类风险警示"继续生效"的声明
+_ACTION_CONTINUE: Final[str] = "continue"
 
 _DATE_CN = r"(\d{4})\s*年\s*(\d{1,2})\s*月\s{0,3}(\d{1,2})\s*日"
 _DATE_ANY = r"(\d{4})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s{0,3}(\d{1,2})\s*日?"
@@ -138,6 +155,9 @@ class RiskWarningEvent:
     title: str
     basis: str                      # 判定依据（哪句话支撑）
     code: str | None = None
+    #: 本公告生效同时"继续实施"的**其它**范围（起点未知，仅表示自 effective_date 起仍在实施）。
+    #: 例：撤销退市风险警示并继续被实施其他风险警示 → (SCOPE_OTHER,)
+    continues: tuple[str, ...] = ()
 
 
 def _classify_title(title: str) -> tuple[str, str] | None:
@@ -168,6 +188,16 @@ def _classify_title(title: str) -> tuple[str, str] | None:
     if "其他风险警示" in t:
         return EVENT_IMPLEMENT, SCOPE_OTHER
     return EVENT_IMPLEMENT, SCOPE_UNKNOWN
+
+
+def _detect_continues(text: str) -> tuple[str, ...]:
+    """从正文识别"撤销某类警示的同时继续实施另一类警示"的范围。"""
+    found: list[str] = []
+    if re.search(r"继续(?:被)?实施其他风险警示", text):
+        found.append(SCOPE_OTHER)
+    if re.search(r"继续(?:被)?实施退市风险警示", text):
+        found.append(SCOPE_DELISTING)
+    return tuple(found)
 
 
 _SUSPENSION_PATTERNS = (
@@ -223,6 +253,7 @@ def parse_risk_warning_event(*, title: str, text: str) -> RiskWarningEvent | Non
         kind=kind, scope=scope, effective_date=effective,
         suspension_date=suspension, resume_date=resume,
         title=clean_title, basis=basis, code=code,
+        continues=_detect_continues(text),
     )
 
 
@@ -232,6 +263,7 @@ class StInterval:
     """一段风险警示区间（实施 → 撤销）。
 
     end_date 为 None 表示"截至已知事件仍未撤销"；complete=False 表示事件链不完整（不猜）。
+    **区间只描述单一范围**；"撤销退市但继续其他"这类跨范围信息见 `continues` 与状态查询。
     """
 
     scope: str
@@ -244,9 +276,12 @@ class StInterval:
 def build_st_intervals(events: Iterable[RiskWarningEvent]) -> tuple[StInterval, ...]:
     """把同一范围（退市/其他）的实施-撤销事件配成区间。
 
+    处理规则：
+        - **去重**：同 (kind, effective_date) 视为重复公告，只保留一条；
+        - **同日冲突**（同范围同一天既有实施又有撤销）→ 只产出一条 complete=False 的冲突标记，
+          不硬配成"实施 d → 撤销 d"这种看似合法的区间；
+        - 只有撤销没有实施、连续两次实施 等不完整情形 → complete=False，**不推测缺失日期**。
     只在事件链完整（实施→撤销 交替、且以实施开头）时给 complete=True。
-    出现"只有撤销没有实施"、"连续两次实施"等不完整情形时，仍产出区间并标 complete=False，
-    **不推测缺失日期**。
     """
     by_scope: dict[str, list[RiskWarningEvent]] = {}
     for ev in events:
@@ -256,16 +291,27 @@ def build_st_intervals(events: Iterable[RiskWarningEvent]) -> tuple[StInterval, 
 
     intervals: list[StInterval] = []
     for scope, evs in by_scope.items():
-        evs = sorted(evs, key=lambda e: e.effective_date or "")
-        open_start: str | None = None
-        open_note: str | None = None
+        unique: dict[tuple[str, str], RiskWarningEvent] = {}
         for ev in evs:
+            unique.setdefault((ev.kind, ev.effective_date or ""), ev)
+        ordered = sorted(unique.values(), key=lambda e: (e.effective_date or "", e.kind))
+
+        kinds_by_date: dict[str, set[str]] = {}
+        for ev in ordered:
+            kinds_by_date.setdefault(ev.effective_date or "", set()).add(ev.kind)
+        conflicts = sorted(d for d, ks in kinds_by_date.items() if len(ks) > 1)
+        if conflicts:
+            intervals.append(StInterval(scope, None, None, False,
+                                        f"同日同时存在实施与撤销（冲突）：{'、'.join(conflicts)}，无法配成区间"))
+            continue
+
+        open_start: str | None = None
+        for ev in ordered:
             if ev.kind == EVENT_IMPLEMENT:
                 if open_start is not None:
                     intervals.append(StInterval(scope, open_start, None, False,
                                                 f"两次实施之间缺少撤销公告（{open_start} → {ev.effective_date}）"))
                 open_start = ev.effective_date
-                open_note = None
             else:  # revoke
                 if open_start is None:
                     intervals.append(StInterval(scope, None, ev.effective_date, False,
@@ -281,16 +327,115 @@ def build_st_intervals(events: Iterable[RiskWarningEvent]) -> tuple[StInterval, 
     return tuple(intervals)
 
 
+# --------------------------------------------------------------------------- 状态查询
+@dataclass(frozen=True)
+class ScopeStatus:
+    """某范围（退市/其他）在某交易日的状态。
+
+    status: STATUS_ACTIVE（已确认实施）/ STATUS_INACTIVE（已确认撤销）/ STATUS_UNKNOWN（无法判定）。
+    complete: 该范围已知事件链是否完整（以实施开头、实施/撤销交替、无未知日期事件、无冲突）。
+    """
+
+    scope: str
+    date: str
+    status: str
+    complete: bool
+    basis: str
+
+
+def _scope_chain(events: Sequence[RiskWarningEvent], scope: str) -> tuple[list[tuple[str, str]], bool]:
+    """取某范围的有日期变更（含"继续实施"声明）；返回 (changes, 是否存在无日期事件)。"""
+    changes: list[tuple[str, str]] = []
+    has_unknown_date = False
+    for ev in events:
+        if ev.scope == scope and ev.kind in (EVENT_IMPLEMENT, EVENT_REVOKE):
+            if ev.effective_date is None:
+                has_unknown_date = True
+            else:
+                changes.append((ev.effective_date, ev.kind))
+        if scope in getattr(ev, "continues", ()) and ev.effective_date:
+            changes.append((ev.effective_date, _ACTION_CONTINUE))
+    changes = sorted(set(changes))  # 去重：重复公告不改变事件链
+    return changes, has_unknown_date
+
+
+def _chain_complete(changes: Sequence[tuple[str, str]], has_unknown_date: bool) -> bool:
+    """事件链是否完整：以实施开头、同范围实施/撤销交替、无未知日期事件、无同日冲突。"""
+    if has_unknown_date or not changes:
+        return False
+    if changes[0][1] != EVENT_IMPLEMENT:
+        return False
+    for (d1, a1), (d2, a2) in zip(changes, changes[1:]):
+        if a1 == a2 or d1 == d2:
+            return False
+    return True
+
+
+def query_risk_warning_status(
+    events: Iterable[RiskWarningEvent], *, date: str
+) -> tuple[ScopeStatus, ...]:
+    """查询某交易日的两类风险警示状态（退市风险警示、其他风险警示各自一条）。
+
+    契约（**不猜**）：
+        - 无任何事件记录、早于首个已知变更、存在同日冲突 → STATUS_UNKNOWN；
+        - "撤销"只有在事件链完整时才判为 STATUS_INACTIVE（否则 UNKNOWN，**不默认非 ST**）；
+        - "实施"或公告明确的"继续实施" → STATUS_ACTIVE；
+        - 当前简称不作为任何输入，绝不用它推断历史状态。
+    """
+    materialized = list(events)
+    return tuple(_scope_status(materialized, scope, date) for scope in (SCOPE_DELISTING, SCOPE_OTHER))
+
+
+def _scope_status(events: Sequence[RiskWarningEvent], scope: str, date: str) -> ScopeStatus:
+    changes, has_unknown_date = _scope_chain(events, scope)
+    if not changes:
+        return ScopeStatus(scope, date, STATUS_UNKNOWN, False,
+                           "该范围无任何事件记录：不得默认认定为非 ST（不猜）")
+
+    kinds_by_date: dict[str, set[str]] = {}
+    for d, action in changes:
+        kinds_by_date.setdefault(d, set()).add(action)
+    conflicts = sorted(d for d, ks in kinds_by_date.items() if len(ks) > 1 and d <= date)
+    if conflicts:
+        return ScopeStatus(scope, date, STATUS_UNKNOWN, False,
+                           f"存在同日冲突：{'、'.join(conflicts)}，无法判定")
+
+    if date < changes[0][0]:
+        return ScopeStatus(scope, date, STATUS_UNKNOWN, False,
+                           f"早于已知首个变更（{changes[0][0]}）：此前历史未知（不猜）")
+
+    complete = _chain_complete(changes, has_unknown_date)
+    latest_date, latest_action = [c for c in changes if c[0] <= date][-1]
+
+    if latest_action == _ACTION_CONTINUE:
+        return ScopeStatus(scope, date, STATUS_ACTIVE, complete,
+                           f"{latest_date} 起明确继续实施（该范围起点未知）")
+    if latest_action == EVENT_IMPLEMENT:
+        note = "事件链完整" if complete else "事件链不完整（缺撤销或非交替），但该日实施状态由公告直接支撑"
+        return ScopeStatus(scope, date, STATUS_ACTIVE, complete, f"最近一次变更为实施（{latest_date}）；{note}")
+    # revoke：只有链完整才敢判 INACTIVE
+    if complete:
+        return ScopeStatus(scope, date, STATUS_INACTIVE, True,
+                           f"已撤销（{latest_date}），事件链完整")
+    return ScopeStatus(scope, date, STATUS_UNKNOWN, False,
+                       f"最近一次变更为撤销（{latest_date}），但事件链不完整（缺少对应的实施事件）：不判定为非 ST")
+
+
 __all__ = [
     "EVENT_IMPLEMENT",
     "EVENT_REVOKE",
     "SCOPE_DELISTING",
     "SCOPE_OTHER",
     "SCOPE_UNKNOWN",
+    "STATUS_ACTIVE",
+    "STATUS_INACTIVE",
+    "STATUS_UNKNOWN",
     "AnnouncementParseError",
     "RiskWarningEvent",
+    "ScopeStatus",
     "StInterval",
     "build_st_intervals",
     "extract_text_from_pdf",
     "parse_risk_warning_event",
+    "query_risk_warning_status",
 ]

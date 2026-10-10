@@ -57,12 +57,18 @@ from .st_history import (
     SCOPE_DELISTING,
     SCOPE_OTHER,
     SCOPE_UNKNOWN,
+    # 注意：STATUS_UNKNOWN 与 limits 的同名常量取值相同（"unknown"），语义均为"无法判定"
+    STATUS_ACTIVE,
+    STATUS_INACTIVE,
+    STATUS_UNKNOWN,
     AnnouncementParseError,
     RiskWarningEvent,
+    ScopeStatus,
     StInterval,
     build_st_intervals,
     extract_text_from_pdf,
     parse_risk_warning_event,
+    query_risk_warning_status,
 )
 
 __all__ = [
@@ -116,4 +122,8 @@ __all__ = [
     "SCOPE_DELISTING",
     "SCOPE_OTHER",
     "SCOPE_UNKNOWN",
+    "STATUS_ACTIVE",
+    "STATUS_INACTIVE",
+    "ScopeStatus",
+    "query_risk_warning_status",
 ]
