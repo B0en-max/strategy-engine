@@ -45,14 +45,20 @@ import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Final, Mapping, Sequence
+from typing import Any, Final, Iterator, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 
 from database import models
 from database.validation import require_number, require_timeframe
 
-from .base import DataSourceError, KlineBar, KlineDataSource, require_symbol_code
+from .base import (
+    DataSourceError,
+    KlineBar,
+    KlineDataSource,
+    require_symbol_code,
+    timeframe_to_seconds,
+)
 from .http_source import Opener, default_opener, parse_response_number, parse_response_timestamp
 
 #: OKX 公开接口基地址（可参数覆盖）
@@ -73,6 +79,15 @@ OKX_BAR_BY_TIMEFRAME: Final[dict[str, str]] = {
     "1h": "1H", "2h": "2H", "4h": "4H", "6h": "6H", "12h": "12H",
     "1d": "1D", "2d": "2D", "3d": "3D", "1w": "1W", "1M": "1M",
 }
+
+#: Stage 032.1 要求的九个周期（OKX 均有**原生** bar，无需派生）
+REQUIRED_TIMEFRAMES: Final[tuple[str, ...]] = (
+    "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d",
+)
+
+#: 派生周期 → 基础周期（显式登记；当前为空表：9 个周期都有原生 bar）
+#: 若未登记的周期没有原生 bar，把它登记到这里，或用 allow_derivation 显式启用严格聚合
+DERIVED_TIMEFRAME_BASE: Final[dict[str, str]] = {}
 
 #: 单次请求 limit 上限（history-candles = 100；candles = 300）
 HISTORY_PAGE_LIMIT_MAX: Final[int] = 100
@@ -153,6 +168,106 @@ def okx_bar(timeframe: str) -> str:
     return bar
 
 
+#: 周期获取方式
+MODE_NATIVE: Final[str] = "native"
+MODE_DERIVED: Final[str] = "derived"
+MODE_UNSUPPORTED: Final[str] = "unsupported"
+
+
+@dataclass(frozen=True)
+class TimeframePlan:
+    """一个周期怎么拿：原生直取 / 由更细周期严格聚合 / 不支持。"""
+
+    timeframe: str
+    mode: str
+    bar: str | None
+    derived_from: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "timeframe": self.timeframe,
+            "mode": self.mode,
+            "bar": self.bar,
+            "derived_from": self.derived_from,
+        }
+
+
+def timeframe_plan(timeframe: str, *, allow_derivation: bool = True) -> TimeframePlan:
+    """决定某周期是原生直取还是由更细周期聚合（不假定所有周期共用同一 bar 格式）。"""
+    tf = require_timeframe(timeframe)
+    bar = OKX_BAR_BY_TIMEFRAME.get(tf)
+    if bar is not None:
+        return TimeframePlan(tf, MODE_NATIVE, bar, None)
+    base = DERIVED_TIMEFRAME_BASE.get(tf)
+    if base is not None and allow_derivation:
+        base_bar = OKX_BAR_BY_TIMEFRAME.get(base)
+        if base_bar is None:
+            raise DataSourceError(f"派生周期 {tf!r} 的基础周期 {base!r} 没有原生 bar")
+        return TimeframePlan(tf, MODE_DERIVED, base_bar, base)
+    return TimeframePlan(tf, MODE_UNSUPPORTED, None, base)
+
+
+def aggregate_bars(
+    bars: Sequence[KlineBar], base_timeframe: str, target_timeframe: str
+) -> tuple[list[KlineBar], int]:
+    """把更细周期的 K 线**严格聚合**成目标周期，返回 (聚合结果, 跳过的**不完整**分组数)。
+
+    严格规则（不伪造）：
+        - 目标周期必须是基础周期的整数倍，否则报错
+        - 一个分组必须**恰好**包含 ratio 根、且时间戳严格等间隔，否则**整组丢弃**
+          （基础数据缺失时不生成不完整的派生 K 线）
+        - open = 首根 open，close = 末根 close，high = max，low = min，
+          volume / amount = 组内求和（amount 全为 None 时结果也为 None）
+        - 时间戳 = 分组起点（按目标周期对齐）
+    """
+    base_seconds = timeframe_to_seconds(base_timeframe)
+    target_seconds = timeframe_to_seconds(target_timeframe)
+    if target_seconds <= base_seconds or target_seconds % base_seconds != 0:
+        raise DataSourceError(
+            f"无法由 {base_timeframe!r} 聚合出 {target_timeframe!r}（目标必须是基础的整数倍）"
+        )
+    ratio = target_seconds // base_seconds
+    ordered = sorted(bars, key=lambda item: timestamp_to_milliseconds(item.timestamp))
+
+    groups: dict[int, list[KlineBar]] = {}
+    for bar in ordered:
+        ms = timestamp_to_milliseconds(bar.timestamp)
+        key = ms - (ms % (target_seconds * MILLISECONDS_PER_SECOND))
+        groups.setdefault(key, []).append(bar)
+
+    aggregated: list[KlineBar] = []
+    skipped = 0
+    for key in sorted(groups):
+        group = groups[key]
+        if len(group) != ratio:
+            skipped += 1
+            continue
+        expected = group[0]
+        start_ms = timestamp_to_milliseconds(expected.timestamp)
+        contiguous = all(
+            timestamp_to_milliseconds(bar.timestamp) == start_ms + index * base_seconds * MILLISECONDS_PER_SECOND
+            for index, bar in enumerate(group)
+        )
+        if not contiguous:
+            skipped += 1
+            continue
+        amounts = [bar.amount for bar in group]
+        aggregated.append(
+            KlineBar(
+                symbol=group[0].symbol,
+                timeframe=target_timeframe,
+                timestamp=milliseconds_to_timestamp(key),
+                open=group[0].open,
+                high=max(bar.high for bar in group),
+                low=min(bar.low for bar in group),
+                close=group[-1].close,
+                volume=sum(bar.volume for bar in group),
+                amount=None if all(a is None for a in amounts) else sum(a or 0.0 for a in amounts),
+            )
+        )
+    return aggregated, skipped
+
+
 def timestamp_to_milliseconds(timestamp: str) -> int:
     """内部 UTC 时间字符串 → 毫秒时间戳（OKX 请求参数用）。"""
     from database.validation import require_timestamp
@@ -181,6 +296,8 @@ class OkxFetchStats:
     last_timestamp: str | None = None
     #: 最新一根（请求区间内）的原始 confirm 取值，用于说明未完结 K 线的处理
     newest_confirm: str | None = None
+    #: 分页停止原因：no_more_data / reached_start / max_pages / only_unfinished
+    stop_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -194,6 +311,7 @@ class OkxFetchStats:
             "first_timestamp": self.first_timestamp,
             "last_timestamp": self.last_timestamp,
             "newest_confirm": self.newest_confirm,
+            "stop_reason": self.stop_reason,
         }
 
 
@@ -203,6 +321,20 @@ class OkxFetchResult:
 
     bars: tuple[KlineBar, ...]
     stats: OkxFetchStats
+
+
+@dataclass(frozen=True)
+class OkxCandlePage:
+    """分页拉取中的**一页**（供采集器逐页落库 / 断点续传）。"""
+
+    page_index: int
+    bars: tuple[KlineBar, ...]
+    raw_count: int
+    unfinished_filtered: int
+    newest_confirm: str | None
+    requests: int
+    retries: int
+    is_empty: bool
 
 
 def parse_okx_candle(
@@ -297,6 +429,9 @@ class OkxKlineSource(KlineDataSource):
         self._last_request_at: float | None = None
         #: 最近一次 fetch 的结果（含统计），供采集器读取
         self.last_result: OkxFetchResult | None = None
+        #: 分页停止原因（no_more_data / reached_start / max_pages / only_unfinished）
+        self.last_stop_reason: str | None = None
+        self._current_stats: "_StatsBuilder" | None = None
 
     # ------------------------------------------------------------------ 请求
     @property
@@ -375,37 +510,67 @@ class OkxKlineSource(KlineDataSource):
         now_timestamp: str | None = None,
     ) -> OkxFetchResult:
         """按 [start, end] 从新到旧分页拉取，返回**已完结**的 K 线（升序）。"""
+        collected: dict[str, KlineBar] = {}
+        for page in self.iter_candle_pages(
+            instrument,
+            timeframe,
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp,
+            now_timestamp=now_timestamp,
+        ):
+            for bar in page.bars:
+                collected.setdefault(bar.timestamp, bar)
+
+        bars = tuple(collected[key] for key in sorted(collected))
+        stats = self._current_stats.build(bars, self.last_stop_reason)
+        result = OkxFetchResult(bars=bars, stats=stats)
+        self.last_result = result
+        return result
+
+    def iter_candle_pages(
+        self,
+        instrument: OkxInstrument,
+        timeframe: str,
+        *,
+        start_timestamp: str | None = None,
+        end_timestamp: str | None = None,
+        now_timestamp: str | None = None,
+    ) -> Iterator[OkxCandlePage]:
+        """**生成器**：从新到旧逐页拉取，每产出一页调用方即可落一批（断点续传）。
+
+        start_timestamp 为 None 表示一直回溯到交易所的最早记录（全历史回补）。
+        """
         bar = okx_bar(timeframe)
-        require_timeframe(timeframe)
         start_ms = timestamp_to_milliseconds(start_timestamp) if start_timestamp else None
         if end_timestamp is not None:
             end_ms = timestamp_to_milliseconds(end_timestamp)
         else:
             end_ms = timestamp_to_milliseconds(now_timestamp or models.utc_now_str())
 
-        stats = _StatsBuilder(
-            requested_start=start_timestamp, requested_end=end_timestamp
-        )
-        collected: dict[str, KlineBar] = {}
+        stats = _StatsBuilder(requested_start=start_timestamp, requested_end=end_timestamp)
+        self._current_stats = stats
+        self.last_stop_reason = "max_pages"
+        seen: set[str] = set()
         cursor = end_ms + 1  # after = 严格早于该毫秒时间戳
-        pages = 0
+        page_index = 0
+        stop_reason = "max_pages"
 
-        while pages < self._max_pages:
+        while page_index < self._max_pages:
             data = self._request_page(
-                {
-                    "instId": instrument.inst_id,
-                    "bar": bar,
-                    "after": cursor,
-                    "limit": self._page_limit,
-                },
+                {"instId": instrument.inst_id, "bar": bar, "after": cursor, "limit": self._page_limit},
                 stats,
             )
-            pages += 1
+            page_index += 1
             stats.pages += 1
             if not data:
                 stats.empty_responses += 1
+                stop_reason = "no_more_data"
+                yield OkxCandlePage(page_index, (), 0, 0, stats.newest_confirm,
+                                    stats.requests, stats.retries, True)
                 break
 
+            page_bars: list[KlineBar] = []
+            unfinished_here = 0
             oldest_ms: int | None = None
             for raw in data:
                 parsed, confirmed = parse_okx_candle(instrument, timeframe, raw)
@@ -416,23 +581,27 @@ class OkxKlineSource(KlineDataSource):
                     oldest_ms = ts_ms
                 if not confirmed:
                     stats.unfinished_filtered += 1  # 未完结 K 线一律不入库
+                    unfinished_here += 1
                     continue
-                collected.setdefault(parsed.timestamp, parsed)
+                if parsed.timestamp in seen:
+                    continue
+                seen.add(parsed.timestamp)
+                page_bars.append(parsed)
+
+            yield OkxCandlePage(page_index, tuple(page_bars), len(data), unfinished_here,
+                                stats.newest_confirm, stats.requests, stats.retries, False)
 
             if oldest_ms is None:
-                # 整页都是未完结 K 线（正常只出现在最新一页）→ 不再回溯，避免死循环
+                stop_reason = "only_unfinished"
                 break
             if start_ms is not None and oldest_ms <= start_ms:
+                stop_reason = "reached_start"
                 break
             if len(data) < self._page_limit:
-                break  # 返回不足一页 → 已无更早数据
+                stop_reason = "no_more_data"
+                break
             cursor = oldest_ms
-
-        bars = tuple(collected[key] for key in sorted(collected))
-        stats = stats.build(bars)
-        result = OkxFetchResult(bars=bars, stats=stats)
-        self.last_result = result
-        return result
+        self.last_stop_reason = stop_reason
 
     def fetch_klines(
         self,
@@ -466,7 +635,7 @@ class _StatsBuilder:
         self.requested_end = requested_end
         self.newest_confirm: str | None = None
 
-    def build(self, bars: Sequence[KlineBar]) -> OkxFetchStats:
+    def build(self, bars: Sequence[KlineBar], stop_reason: str | None = None) -> OkxFetchStats:
         return OkxFetchStats(
             requests=self.requests,
             pages=self.pages,
@@ -478,6 +647,7 @@ class _StatsBuilder:
             first_timestamp=bars[0].timestamp if bars else None,
             last_timestamp=bars[-1].timestamp if bars else None,
             newest_confirm=self.newest_confirm,
+            stop_reason=stop_reason,
         )
 
 
@@ -496,11 +666,16 @@ __all__ = [
     "RETRYABLE_CODES",
     "OkxFetchResult",
     "OkxFetchStats",
+    "OkxCandlePage",
     "OkxInstrument",
     "OkxKlineSource",
+    "REQUIRED_TIMEFRAMES",
+    "TimeframePlan",
+    "aggregate_bars",
     "get_instrument",
     "milliseconds_to_timestamp",
     "okx_bar",
     "parse_okx_candle",
+    "timeframe_plan",
     "timestamp_to_milliseconds",
 ]

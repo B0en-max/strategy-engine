@@ -22,6 +22,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from database.validation import require_number, require_timestamp, require_timeframe
 
 from .base import DataSourceError, timeframe_to_seconds
+from .okx import milliseconds_to_timestamp, timestamp_to_milliseconds
 
 EPSILON: float = 1e-9
 MILLISECONDS_PER_SECOND: int = 1000
@@ -43,6 +44,10 @@ class KlineQualityReport:
     #: 期望区间数（按周期长度从 first 到 last 推算）与缺失数
     expected_intervals: int
     missing_intervals: int
+    #: 缺失区间明细：((起始缺失时间, 结束缺失时间, 缺失根数), ...)
+    gap_ranges: tuple[tuple[str, str, int], ...]
+    #: 实际覆盖天数（(last - first) / 一天）
+    coverage_days: float
     invalid_bars: int
     warnings: tuple[str, ...]
 
@@ -68,6 +73,8 @@ class KlineQualityReport:
             "negative_volumes": self.negative_volumes,
             "expected_intervals": self.expected_intervals,
             "missing_intervals": self.missing_intervals,
+            "gap_ranges": [[start, end, count] for start, end, count in self.gap_ranges],
+            "coverage_days": self.coverage_days,
             "invalid_bars": self.invalid_bars,
             "warnings": list(self.warnings),
         }
@@ -146,24 +153,44 @@ def analyze_klines(
 
     expected_intervals = 0
     missing_intervals = 0
+    gap_ranges: list[tuple[str, str, int]] = []
+    coverage_days = 0.0
     step = timeframe_to_seconds(tf) * MILLISECONDS_PER_SECOND
     if first is not None and last is not None:
-        from .okx import timestamp_to_milliseconds  # 复用同一套时间解析
+        first_ms = timestamp_to_milliseconds(first)
+        last_ms = timestamp_to_milliseconds(last)
+        coverage_days = round((last_ms - first_ms) / (MILLISECONDS_PER_SECOND * 86400), 6)
 
-        window_start = start_timestamp or first
-        window_end = end_timestamp or last
-        start_ms = max(timestamp_to_milliseconds(window_start), timestamp_to_milliseconds(first))
-        end_ms = min(timestamp_to_milliseconds(window_end), timestamp_to_milliseconds(last))
-        if end_ms >= start_ms:
-            expected_intervals = (end_ms - start_ms) // step + 1
-            in_window = {
-                ts
-                for ts in seen
-                if timestamp_to_milliseconds(window_start)
-                <= timestamp_to_milliseconds(ts)
-                <= timestamp_to_milliseconds(window_end)
-            }
-            missing_intervals = max(0, expected_intervals - len(in_window))
+        # 缺失只在「实际收到的跨度」与「请求区间」的交集内统计，
+        # 避免把「交易所本来没有更早数据」误报成缺失。
+        window_start = timestamp_to_milliseconds(start_timestamp) if start_timestamp else first_ms
+        window_end = timestamp_to_milliseconds(end_timestamp) if end_timestamp else last_ms
+        intersect_start = max(first_ms, window_start)
+        intersect_end = min(last_ms, window_end)
+        aligned_start = first_ms + ((intersect_start - first_ms + step - 1) // step) * step
+        aligned_end = first_ms + ((intersect_end - first_ms) // step) * step
+        if aligned_end >= aligned_start:
+            expected_intervals = (aligned_end - aligned_start) // step + 1
+            grid = sorted(
+                ms
+                for ms in (timestamp_to_milliseconds(ts) for ts in seen)
+                if aligned_start <= ms <= aligned_end
+            )
+            missing_intervals = max(0, expected_intervals - len(grid))
+            previous: int | None = None
+            for ms in grid:
+                if previous is not None and ms - previous > step:
+                    count = (ms - previous) // step - 1
+                    gap_ranges.append(
+                        (milliseconds_to_timestamp(previous + step),
+                         milliseconds_to_timestamp(ms - step), count)
+                    )
+                previous = ms
+            if not grid and expected_intervals:
+                gap_ranges.append(
+                    (milliseconds_to_timestamp(aligned_start),
+                     milliseconds_to_timestamp(aligned_end), expected_intervals)
+                )
 
     warnings: list[str] = []
     if not rows:
@@ -195,6 +222,8 @@ def analyze_klines(
         negative_volumes=negative_volume,
         expected_intervals=expected_intervals,
         missing_intervals=missing_intervals,
+        gap_ranges=tuple(gap_ranges),
+        coverage_days=coverage_days,
         invalid_bars=invalid_bars,
         warnings=tuple(warnings),
     )

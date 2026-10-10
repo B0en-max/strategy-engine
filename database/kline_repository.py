@@ -254,6 +254,21 @@ class KlineRepository(Repository):
             (symbol_id, timeframe),
         )
 
+    def get_earliest_kline(self, symbol_id: int, timeframe: str) -> sqlite3.Row | None:
+        """返回 timestamp 最小（最早）的一条 K 线；没有数据时返回 None。
+
+        与 get_latest_kline() 对称的只读方法：用于全历史回补的**断点续传游标**
+        （只向更早的方向继续，不重复下载已入库的新端）。
+        """
+        symbol_id = require_positive_int(symbol_id, "symbol_id")
+        timeframe = require_timeframe(timeframe)
+        return self.query_one(
+            f"SELECT {_SELECT_COLUMNS} FROM {KLINES} "
+            "WHERE symbol_id = ? AND timeframe = ? "
+            "ORDER BY timestamp ASC LIMIT 1",
+            (symbol_id, timeframe),
+        )
+
     def list_recent_klines(
         self,
         symbol_id: int,
