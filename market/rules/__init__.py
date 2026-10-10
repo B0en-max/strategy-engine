@@ -1,0 +1,82 @@
+"""A 股交易规则基础层（Stage 027′ Data Foundation）。
+
+本层只做两件事：
+    - `contract`：最简数据契约（时间/价格/缺失/股票池/涨跌停输入）
+    - `limits`  ：涨跌停价判定与 K 线对照（纯函数、无 IO）
+
+明确不属于本层：打板策略、晋级率统计、数据抓取、数据库读写。
+"""
+
+from .contract import (
+    MISSING_NOT_TRADING_DAY,
+    MISSING_PRESENT,
+    MISSING_PRE_LISTING,
+    MISSING_SOURCE_GAP,
+    MISSING_SUSPENDED,
+    MISSING_UNKNOWN,
+    PRICE_BASIS_FORWARD_ADJUSTED_VIEW,
+    PRICE_BASIS_UNADJUSTED,
+    UNIVERSE_CURRENT_SNAPSHOT,
+    UNIVERSE_HISTORICAL,
+    classify_missing,
+)
+from .limits import (
+    BASIS_NO_LIMIT_NEW_LISTING,
+    BOARD_LIMIT_RATIOS,
+    BSE,
+    DEFAULT_TICK,
+    LIMIT_STAGES,
+    LISTING_STAGE_NO_LIMIT,
+    LISTING_STAGE_TRADING,
+    SSE_MAIN,
+    SSE_STAR,
+    ST_LIMIT_RATIOS,
+    STATUS_NO_LIMIT,
+    STATUS_OK,
+    STATUS_UNKNOWN,
+    SZSE_GEM,
+    SZSE_MAIN,
+    LimitPriceResult,
+    PrevCloseResult,
+    classify_bar_against_limits,
+    compute_limit_prices,
+    resolve_limit_ratio,
+    resolve_prev_close,
+    round_to_tick,
+)
+
+__all__ = [
+    "BASIS_NO_LIMIT_NEW_LISTING",
+    "BOARD_LIMIT_RATIOS",
+    "BSE",
+    "DEFAULT_TICK",
+    "LIMIT_STAGES",
+    "LISTING_STAGE_NO_LIMIT",
+    "LISTING_STAGE_TRADING",
+    "LimitPriceResult",
+    "MISSING_NOT_TRADING_DAY",
+    "MISSING_PRESENT",
+    "MISSING_PRE_LISTING",
+    "MISSING_SOURCE_GAP",
+    "MISSING_SUSPENDED",
+    "MISSING_UNKNOWN",
+    "PRICE_BASIS_FORWARD_ADJUSTED_VIEW",
+    "PRICE_BASIS_UNADJUSTED",
+    "PrevCloseResult",
+    "ST_LIMIT_RATIOS",
+    "SSE_MAIN",
+    "SSE_STAR",
+    "STATUS_NO_LIMIT",
+    "STATUS_OK",
+    "STATUS_UNKNOWN",
+    "SZSE_GEM",
+    "SZSE_MAIN",
+    "UNIVERSE_CURRENT_SNAPSHOT",
+    "UNIVERSE_HISTORICAL",
+    "classify_bar_against_limits",
+    "classify_missing",
+    "compute_limit_prices",
+    "resolve_limit_ratio",
+    "resolve_prev_close",
+    "round_to_tick",
+]

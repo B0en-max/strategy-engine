@@ -1,0 +1,264 @@
+"""Stage 027′：涨跌停规则测试（market.rules.limits）。
+
+只覆盖**关键边界**，不重复已有测试：
+    - 板块比例：主板 / 创业板 / 科创板 / 北交所 / ST / 科创板无 ST 制度 / 未知板块
+    - 价格与四舍五入（含 half-up 边界、与实测涨停案例交叉验证）
+    - 新股无涨跌幅限制阶段（不得当作 ±10% 或 0）
+    - 除权除息日 / 前复权价不得当涨跌停基准
+    - 前收盘缺失、非法、跨缺失交易日的处置（一律 unknown，不推断停牌/未涨停）
+    - K 线与涨跌停价的事实性对照（封住 / 触及未封 / 跌停 / 区间内 / 缺值）
+    - 临时数据库集成：真实表结构下跑一遍，并证明**未触碰正式数据库**
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+import unittest
+from decimal import Decimal
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from database import KlineRepository, SymbolRepository, initialize_database  # noqa: E402
+from market.rules import (  # noqa: E402
+    BSE,
+    BOARD_LIMIT_RATIOS,
+    LISTING_STAGE_NO_LIMIT,
+    SSE_MAIN,
+    SSE_STAR,
+    STATUS_NO_LIMIT,
+    STATUS_OK,
+    STATUS_UNKNOWN,
+    SZSE_GEM,
+    SZSE_MAIN,
+    classify_bar_against_limits,
+    compute_limit_prices,
+    resolve_limit_ratio,
+    resolve_prev_close,
+    round_to_tick,
+)
+
+FORMAL_DB = PROJECT_ROOT / "data" / "strategy_engine.db"
+
+
+class BoardCodeConsistencyTest(unittest.TestCase):
+    """规则层的板块代码必须与数据层（Stage 24 交易板块）完全一致。"""
+
+    def test_board_codes_match_data_layer(self) -> None:
+        from market.data.boards import BOARD_CODES
+
+        self.assertEqual(set(BOARD_CODES), {SSE_MAIN, SZSE_MAIN, SZSE_GEM, SSE_STAR, BSE})
+        self.assertEqual(set(BOARD_CODES), set(BOARD_LIMIT_RATIOS))
+
+
+class LimitRatioTest(unittest.TestCase):
+    def test_board_ratios(self) -> None:
+        for board, expected in ((SSE_MAIN, "0.10"), (SZSE_MAIN, "0.10"), (SZSE_GEM, "0.20"),
+                                (SSE_STAR, "0.20"), (BSE, "0.30")):
+            ratio, basis = resolve_limit_ratio(board)
+            self.assertEqual(ratio, Decimal(expected), board)
+            self.assertIn(board, basis)
+
+    def test_st_ratios(self) -> None:
+        self.assertEqual(resolve_limit_ratio(SSE_MAIN, is_st=True)[0], Decimal("0.05"))
+        self.assertEqual(resolve_limit_ratio(SZSE_MAIN, is_st=True)[0], Decimal("0.05"))
+        # 创业板 ST 仍是 20%（制度）
+        self.assertEqual(resolve_limit_ratio(SZSE_GEM, is_st=True)[0], Decimal("0.20"))
+
+    def test_star_market_st_keeps_20_percent(self) -> None:
+        # 制度 + 实证：科创板 *ST 涨跌幅仍为 20%（实测 13 只科创板 ST 最大日内涨幅 20.45%）
+        ratio, basis = resolve_limit_ratio(SSE_STAR, is_st=True)
+        self.assertEqual(ratio, Decimal("0.20"))
+        self.assertEqual(compute_limit_prices("10.00", board=SSE_STAR, is_st=True).upper, Decimal("12.00"))
+
+    def test_every_board_has_normal_and_st_ratio(self) -> None:
+        # 5 个板块都必须能给出常规与 ST 两套比例，不得出现“板块存在但 ST 无比例”的隐式缺口
+        for board in BOARD_LIMIT_RATIOS:
+            self.assertIsNotNone(resolve_limit_ratio(board)[0], board)
+            self.assertIsNotNone(resolve_limit_ratio(board, is_st=True)[0], f"{board} ST")
+
+    def test_main_board_st_ratio_differs_from_star(self) -> None:
+        # 主板 ST 5% vs 科创板 ST 20%，不得混用同一张表（历史上曾把科创板 ST 误判为 unknown）
+        self.assertEqual(resolve_limit_ratio(SZSE_MAIN, is_st=True)[0], Decimal("0.05"))
+        self.assertEqual(resolve_limit_ratio(SSE_STAR, is_st=True)[0], Decimal("0.20"))
+
+    def test_unknown_board_is_not_guessed(self) -> None:
+        for board in (None, "", "NASDAQ"):
+            ratio, basis = resolve_limit_ratio(board)
+            self.assertIsNone(ratio)
+            self.assertTrue(basis)
+
+
+class LimitPriceTest(unittest.TestCase):
+    def test_main_board_prices(self) -> None:
+        result = compute_limit_prices("1258.62", board=SSE_MAIN)
+        self.assertEqual(result.status, STATUS_OK)
+        self.assertEqual(result.upper, Decimal("1384.48"))
+        self.assertEqual(result.lower, Decimal("1132.76"))
+
+    def test_rounding_is_half_up(self) -> None:
+        # 10.05 × 1.1 = 11.055 → half-up 11.06（银行家舍入会得 11.06 之外的结果）
+        self.assertEqual(round_to_tick(Decimal("11.055")), Decimal("11.06"))
+        upper = compute_limit_prices("10.05", board=SSE_MAIN).upper
+        self.assertEqual(upper, Decimal("11.06"))
+        self.assertEqual(compute_limit_prices("10.05", board=SSE_MAIN).lower, Decimal("9.05"))
+
+    def test_matches_real_observed_limit_up_examples(self) -> None:
+        # 来自实测：600010 前收 1.90 → 涨停 2.09；300001 前收 24.11 → 28.93
+        self.assertEqual(compute_limit_prices("1.90", board=SSE_MAIN).upper, Decimal("2.09"))
+        self.assertEqual(compute_limit_prices("24.11", board=SZSE_GEM).upper, Decimal("28.93"))
+
+    def test_st_main_board_5_percent(self) -> None:
+        result = compute_limit_prices("10.00", board=SSE_MAIN, is_st=True)
+        self.assertEqual(result.upper, Decimal("10.50"))
+        self.assertEqual(result.lower, Decimal("9.50"))
+
+    def test_bse_30_percent(self) -> None:
+        result = compute_limit_prices("20.00", board=BSE)
+        self.assertEqual(result.upper, Decimal("26.00"))
+        self.assertEqual(result.lower, Decimal("14.00"))
+
+    def test_custom_tick(self) -> None:
+        result = compute_limit_prices("10.005", board=SSE_MAIN, tick=Decimal("0.001"))
+        self.assertEqual(result.upper, Decimal("11.006"))
+
+    def test_new_listing_stage_has_no_limit(self) -> None:
+        result = compute_limit_prices("10.00", board=SZSE_GEM, listing_stage=LISTING_STAGE_NO_LIMIT)
+        self.assertEqual(result.status, STATUS_NO_LIMIT)
+        self.assertIsNone(result.upper)
+        self.assertIsNone(result.lower)
+        self.assertIn("无涨跌幅限制", result.basis)
+
+    def test_unknown_listing_stage_is_unknown(self) -> None:
+        result = compute_limit_prices("10.00", board=SSE_MAIN, listing_stage="ipo")
+        self.assertEqual(result.status, STATUS_UNKNOWN)
+
+    def test_ex_dividend_day_must_use_exchange_reference(self) -> None:
+        result = compute_limit_prices("10.00", board=SSE_MAIN, prev_close_is_exchange_reference=False)
+        self.assertEqual(result.status, STATUS_UNKNOWN)
+        self.assertIsNone(result.upper)
+        self.assertIn("交易所参考前收盘价", result.basis)
+
+    def test_invalid_prev_close_is_unknown(self) -> None:
+        for value in (None, 0, -1, "abc", "", float("nan")):
+            result = compute_limit_prices(value, board=SSE_MAIN)
+            self.assertEqual(result.status, STATUS_UNKNOWN, f"value={value!r}")
+            self.assertIsNone(result.upper)
+
+    def test_unknown_board_yields_unknown_status(self) -> None:
+        result = compute_limit_prices("10.00", board=None)
+        self.assertEqual(result.status, STATUS_UNKNOWN)
+        self.assertIsNone(result.upper)
+
+
+class PrevCloseTest(unittest.TestCase):
+    def test_ok_from_previous_bar(self) -> None:
+        result = resolve_prev_close("10.00", sessions_since_prev_bar=1)
+        self.assertEqual(result.status, STATUS_OK)
+        self.assertEqual(result.prev_close, Decimal("10.00"))
+
+    def test_missing_bar_is_not_interpreted_as_suspension(self) -> None:
+        result = resolve_prev_close(None, bar_present=False)
+        self.assertEqual(result.status, STATUS_UNKNOWN)
+        self.assertIn("不推断为停牌", result.reason)
+        self.assertIn("未涨停", result.reason)
+
+    def test_session_gap_requires_calendar_confirmation(self) -> None:
+        result = resolve_prev_close("10.00", sessions_since_prev_bar=3)
+        self.assertEqual(result.status, STATUS_UNKNOWN)
+        self.assertIn("缺 2 个交易日", result.reason)
+
+    def test_corporate_action_requires_exchange_reference(self) -> None:
+        result = resolve_prev_close("10.00", corporate_action=True)
+        self.assertEqual(result.status, STATUS_UNKNOWN)
+        self.assertIn("除权除息", result.reason)
+
+    def test_invalid_previous_close(self) -> None:
+        for value in (None, "0", "abc"):
+            self.assertEqual(resolve_prev_close(value).status, STATUS_UNKNOWN, f"value={value!r}")
+
+
+class BarAgainstLimitsTest(unittest.TestCase):
+    def test_states(self) -> None:
+        upper, lower = Decimal("11.00"), Decimal("9.00")
+        self.assertEqual(classify_bar_against_limits(high="11.00", low="10.50", close="11.00",
+                                                     upper=upper, lower=lower), "at_upper")
+        self.assertEqual(classify_bar_against_limits(high="11.00", low="10.20", close="10.80",
+                                                     upper=upper, lower=lower), "touched_upper")
+        self.assertEqual(classify_bar_against_limits(high="9.90", low="9.00", close="9.00",
+                                                     upper=upper, lower=lower), "at_lower")
+        self.assertEqual(classify_bar_against_limits(high="10.90", low="10.10", close="10.50",
+                                                     upper=upper, lower=lower), "inside")
+
+    def test_unknown_when_values_or_bounds_missing(self) -> None:
+        self.assertEqual(classify_bar_against_limits(high=None, low="9.9", close="10",
+                                                     upper=Decimal("11"), lower=Decimal("9")), STATUS_UNKNOWN)
+        self.assertEqual(classify_bar_against_limits(high="10.5", low="10.1", close="10.2",
+                                                     upper=None, lower=None), STATUS_UNKNOWN)
+
+
+class TempDatabaseIntegrationTest(unittest.TestCase):
+    """在临时数据库（真实表结构）上跑一遍，并证明不触碰正式数据库。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmp.name) / "foundation.db"
+        initialize_database(self.db_path)
+        self.symbols = SymbolRepository(self.db_path)
+        self.klines = KlineRepository(self.db_path)
+        self.formal_before = (FORMAL_DB.stat().st_size, FORMAL_DB.stat().st_mtime) if FORMAL_DB.exists() else None
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _seed(self, code: str, bars: list[tuple[str, float, float, float, float]]) -> int:
+        symbol_id = self.symbols.create_symbol(code, f"测试{code}", "CN", "STOCK")
+        rows = [
+            {"symbol_id": symbol_id, "timeframe": "1d", "timestamp": f"{day} 00:00:00",
+             "open": open_, "high": high, "low": low, "close": close, "volume": 1_000_000, "amount": None}
+            for day, open_, high, low, close in bars
+        ]
+        self.klines.bulk_upsert_klines(rows)
+        return symbol_id
+
+    def test_limit_up_and_failed_limit_up_from_real_tables(self) -> None:
+        # 600000：09-28 收 10.00 → 09-29 涨停价 11.00，收盘封住
+        self._seed("600000", [("2026-09-28", 10.0, 10.1, 9.9, 10.0), ("2026-09-29", 10.5, 11.0, 10.4, 11.0)])
+        # 601398：09-29 盘中触及 11.00 但收盘 10.80（炸板）
+        self._seed("601398", [("2026-09-28", 10.0, 10.1, 9.9, 10.0), ("2026-09-29", 10.5, 11.0, 10.4, 10.8)])
+
+        for code, expected in (("600000", "at_upper"), ("601398", "touched_upper")):
+            symbol_id = self.symbols.get_symbol("CN", code)["id"]
+            bars = self.klines.list_klines(symbol_id, "1d")
+            prev = resolve_prev_close(bars[-2]["close"], sessions_since_prev_bar=1)
+            limit = compute_limit_prices(prev.prev_close, board=SSE_MAIN)
+            self.assertEqual(limit.status, STATUS_OK)
+            state = classify_bar_against_limits(
+                high=bars[-1]["high"], low=bars[-1]["low"], close=bars[-1]["close"],
+                upper=limit.upper, lower=limit.lower,
+            )
+            self.assertEqual(state, expected, code)
+
+    def test_missing_bar_yields_unknown_not_a_guess(self) -> None:
+        self._seed("000001", [("2026-09-28", 10.0, 10.1, 9.9, 10.0)])
+        # 假设 09-29 该标的没有 K 线：只能得到 unknown
+        result = resolve_prev_close(None, bar_present=False, sessions_since_prev_bar=None)
+        self.assertEqual(result.status, STATUS_UNKNOWN)
+        limit = compute_limit_prices(result.prev_close, board=SZSE_MAIN)
+        self.assertEqual(limit.status, STATUS_UNKNOWN)
+
+    def test_formal_database_untouched(self) -> None:
+        if self.formal_before is None:
+            self.skipTest("正式库不存在")
+        self._seed("600519", [("2026-09-28", 10.0, 10.1, 9.9, 10.0)])
+        after = (FORMAL_DB.stat().st_size, FORMAL_DB.stat().st_mtime)
+        self.assertEqual(self.formal_before, after)
+        self.assertNotEqual(os.fspath(self.db_path), os.fspath(FORMAL_DB))
+
+
+if __name__ == "__main__":
+    unittest.main()
