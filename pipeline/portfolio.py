@@ -57,6 +57,7 @@ from typing import Any, Final, Mapping
 from backtest.metrics import BacktestMetrics, compute_metrics, realized_trades
 from database import (
     KlineRepository,
+    OrderRepository,
     SignalRepository,
     StrategyDefinitionRepository,
     StrategyRepository,
@@ -66,7 +67,11 @@ from database import (
     resolve_database_path,
 )
 from execution import ExecutionEngine
-from execution.engine import SIDE_BY_DIRECTION, apply_trade_to_position
+from execution.engine import (
+    ORDER_TYPE_MARKET,
+    SIDE_BY_DIRECTION,
+    apply_trade_to_position,
+)
 from strategies.base import Bar, BarWindow, bar_from_kline_row, require_direction
 from strategies.runner import DEFAULT_STRATEGIES, build_strategy
 
@@ -103,6 +108,9 @@ REJECT_INSUFFICIENT_CASH: Final[str] = "insufficient_cash"
 REJECT_INSUFFICIENT_POSITION: Final[str] = "insufficient_position"
 REJECT_POSITION_LIMIT: Final[str] = "position_limit"
 UNFILLED_NO_NEXT_BAR: Final[str] = "no_next_bar"
+
+#: 拒单对应的订单状态（orders 表既有取值；拒单必须落库，不能只改信号状态）
+ORDER_STATUS_REJECTED: Final[str] = "rejected"
 
 
 @dataclass(frozen=True)
@@ -522,6 +530,7 @@ def _execute(
 
     signals = SignalRepository(run_db)
     trades_repo = TradeRepository(run_db)
+    orders = OrderRepository(run_db)
     execution = ExecutionEngine(run_db)
 
     cash = float(spec.initial_capital)
@@ -549,50 +558,50 @@ def _execute(
         fill_price = spec.costs.fill_price(order.side, order.base_price)
         fee = spec.costs.fee(order.side, fill_price, order.quantity)
 
+        def reject(reason: str, **extra: Any) -> None:
+            """拒单：落一条 status='rejected' 的订单（现金/持仓不变、不产生成交）。"""
+            order_id = orders.create_order(
+                states[code].run_symbol_id,
+                order.side,
+                order.quantity,
+                order_type=ORDER_TYPE_MARKET,
+                price=fill_price,
+                signal_id=order.signal_id,
+                status=ORDER_STATUS_REJECTED,
+            )
+            signals.update_signal_status(order.signal_id, "cancelled")
+            rejected.append(
+                {
+                    "symbol": code,
+                    "signal_timestamp": order.signal_timestamp,
+                    "side": order.side,
+                    "quantity": order.quantity,
+                    "order_id": order_id,
+                    "reason": reason,
+                    **extra,
+                }
+            )
+
         if order.side == "buy":
             cost = fill_price * order.quantity
             if cost + fee > cash + QUANTITY_EPSILON:
-                signals.update_signal_status(order.signal_id, "cancelled")
-                rejected.append(
-                    {
-                        "symbol": code,
-                        "signal_timestamp": order.signal_timestamp,
-                        "side": order.side,
-                        "quantity": order.quantity,
-                        "required_cash": round(cost + fee, 6),
-                        "available_cash": round(cash, 6),
-                        "reason": REJECT_INSUFFICIENT_CASH,
-                    }
+                reject(
+                    REJECT_INSUFFICIENT_CASH,
+                    required_cash=round(cost + fee, 6),
+                    available_cash=round(cash, 6),
                 )
                 return
             max_value = spec.policy.max_position_value
             if max_value is not None and (hold + order.quantity) * fill_price > max_value + QUANTITY_EPSILON:
-                signals.update_signal_status(order.signal_id, "cancelled")
-                rejected.append(
-                    {
-                        "symbol": code,
-                        "signal_timestamp": order.signal_timestamp,
-                        "side": order.side,
-                        "quantity": order.quantity,
-                        "position_value_after": round((hold + order.quantity) * fill_price, 6),
-                        "max_position_value": float(max_value),
-                        "reason": REJECT_POSITION_LIMIT,
-                    }
+                reject(
+                    REJECT_POSITION_LIMIT,
+                    position_value_after=round((hold + order.quantity) * fill_price, 6),
+                    max_position_value=float(max_value),
                 )
                 return
         else:
             if not spec.policy.allow_short and order.quantity > hold + QUANTITY_EPSILON:
-                signals.update_signal_status(order.signal_id, "cancelled")
-                rejected.append(
-                    {
-                        "symbol": code,
-                        "signal_timestamp": order.signal_timestamp,
-                        "side": order.side,
-                        "quantity": order.quantity,
-                        "held_quantity": round(hold, 6),
-                        "reason": REJECT_INSUFFICIENT_POSITION,
-                    }
-                )
+                reject(REJECT_INSUFFICIENT_POSITION, held_quantity=round(hold, 6))
                 return
 
         result = execution.execute_signal(
@@ -872,6 +881,14 @@ def _execute(
             "未做跨标的资产配置优化，资金分配仅为「标的代码升序 + 先到先得」",
         ],
         "unknown_states_not_converted": True,
+        "rejection_policy": (
+            "拒单不改动现金/持仓，不产生成交；落一条 status='rejected' 的订单、信号置为 cancelled，"
+            "并逐条记入 rejected_orders（含 order_id），与订单表对得上"
+        ),
+        "unfilled_policy": (
+            "区间末尾信号无可成交的下一根 K 线时记入 unfilled_signals（信号保持 pending，"
+            "与单标的闭环一致），不产生订单/成交"
+        ),
         "reproducibility": (
             "相同 PortfolioSpec + 相同行情摘要 + 相同策略代码 → 相同 input/result 指纹与结果"
         ),
