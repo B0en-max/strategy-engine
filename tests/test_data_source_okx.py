@@ -107,9 +107,11 @@ class FakeOkxServer:
         self.raise_on_calls = set(raise_on_calls)
         self.calls = 0
         self.requested: list[dict[str, str]] = []
+        self.headers: list[dict[str, str]] = []
 
     def __call__(self, url: str, headers: Any, timeout: float) -> bytes:
         self.calls += 1
+        self.headers.append(dict(headers or {}))
         query = dict(parse_qsl(urlsplit(url).query))
         self.requested.append(query)
         if self.calls in self.raise_on_calls:
@@ -219,6 +221,19 @@ class MappingTest(OkxTestCase):
         self.assertEqual(server.requested[0]["bar"], "1D")
         self.assertEqual(server.requested[0]["limit"], "100")
         self.assertIn("after", server.requested[0])
+
+    def test_request_sends_user_agent(self) -> None:
+        """OKX 的 CDN 对无 UA / Python-urllib 默认 UA 返回 HTTP 403 error 1010；
+        因此请求必须带一个普通客户端 UA（真实环境实测修复）。"""
+        server = FakeOkxServer(series(3))
+        source = self.source(server)
+        source.fetch_klines(symbol="BTC-USDT", timeframe="1h",
+                            start_timestamp="2025-01-01 00:00:00",
+                            end_timestamp="2025-01-01 03:00:00")
+        self.assertTrue(server.headers, "opener 未被调用")
+        agent = server.headers[0].get("User-Agent")
+        self.assertTrue(agent, "请求缺少 User-Agent（真实环境会被 OKX CDN 403 拒绝）")
+        self.assertNotIn("python-urllib", agent.lower())
 
 
 # --------------------------------------------------------------------------- 2/3) 分页与排序

@@ -80,6 +80,14 @@ OKX_BAR_BY_TIMEFRAME: Final[dict[str, str]] = {
     "1d": "1D", "2d": "2D", "3d": "3D", "1w": "1W", "1M": "1M",
 }
 
+#: 请求头（必须带 User-Agent：OKX 的 CDN 对无 UA / Python-urllib 默认 UA 的请求返回
+#: HTTP 403 `error code: 1010`；带上普通客户端 UA 后即返回 200）
+USER_AGENT: Final[str] = "strategy-engine-okx-collector/0.1"
+REQUEST_HEADERS: Final[Mapping[str, str]] = {
+    "Accept": "application/json",
+    "User-Agent": USER_AGENT,
+}
+
 #: Stage 032.1 要求的九个周期（OKX 均有**原生** bar，无需派生）
 REQUIRED_TIMEFRAMES: Final[tuple[str, ...]] = (
     "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d",
@@ -452,7 +460,7 @@ class OkxKlineSource(KlineDataSource):
     def _get_json(self, params: Mapping[str, object]) -> Any:
         url = f"{self._base_url}{self._path}?{urlencode(params)}"
         try:
-            raw = self._opener(url, {"Accept": "application/json"}, self._timeout)
+            raw = self._opener(url, dict(REQUEST_HEADERS), self._timeout)
         except DataSourceError:
             raise
         except HTTPError as exc:

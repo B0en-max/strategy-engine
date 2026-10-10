@@ -41,7 +41,9 @@ from .okx import (
     TimeframePlan,
     aggregate_bars,
     get_instrument,
+    milliseconds_to_timestamp,
     timeframe_plan,
+    timestamp_to_milliseconds,
 )
 from .presets import SINA_KLINE_URL, SINA_TIMEFRAME_MAPPING, sina_cn_kline_config
 from .quality import KlineQualityReport, analyze_klines, deduplicate_rows
@@ -77,6 +79,7 @@ __all__ = [
     "deduplicate_rows",
     "get_instrument",
     "import_klines",
+    "milliseconds_to_timestamp",
     "prepare_kline_rows",
     "sina_cn_kline_config",
     "timeframe_plan",

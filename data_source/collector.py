@@ -553,10 +553,7 @@ def backfill_okx_klines(
                 "unfinished": 0, "pages": 0, "requests": 0, "retries": 0, "recoveries": 0}
     written = 0
     conflict_samples: list[dict[str, Any]] = []
-    gap_ranges: list[tuple[int, int, int]] = []
-    prev_oldest: int | None = None
     retries_before = 0
-    step_ms = timeframe_to_seconds(timeframe) * MILLISECONDS_PER_SECOND
     holder: dict[str, Any] = {"skipped_groups": 0, "base_bars": 0}
 
     if plan.mode == MODE_DERIVED:
@@ -598,14 +595,8 @@ def backfill_okx_klines(
                 "existing": {key: (None if current[key] is None else float(current[key])) for key in _OHLCV_KEYS},
                 "incoming": {key: row[key] for key in _OHLCV_KEYS},
             })
-        # 缺口检测：页内相邻跳变 + 页与页之间的跳变（页面按时间递减且不重叠）
-        for left, right in zip(ms_list, ms_list[1:]):
-            if right - left > step_ms:
-                gap_ranges.append((left + step_ms, right - step_ms, (right - left) // step_ms - 1))
-        if prev_oldest is not None and ms_list[0] < prev_oldest - step_ms:
-            count = (prev_oldest - step_ms - ms_list[0]) // step_ms
-            gap_ranges.append((ms_list[0] + step_ms, prev_oldest - step_ms, count))
-        prev_oldest = ms_list[0]
+        # 缺口一律在全部落库后按**实际持久化数据**统一计算（见下方 analyze_klines）：
+        # 分页顺序（由新到旧）不适合在这里手工拼接边界，容易把页边界误判成缺口。
 
     if plan.mode == MODE_DERIVED:
         stop_reason = f"derived_from:{plan.derived_from}"
@@ -614,18 +605,17 @@ def backfill_okx_klines(
         stop_reason = getattr(data_source, "last_stop_reason", None)
         complete = stop_reason in STOP_COMPLETE
 
-    merged_gaps = _merge_gaps(gap_ranges)
-    missing_intervals = sum(count for _start, _end, count in merged_gaps)
-    all_ms: list[int] = []
-    if symbol_id is not None:
-        rows_in_db = klines.list_klines(symbol_id, timeframe)
-        all_ms = [timestamp_to_milliseconds(str(row["timestamp"])) for row in rows_in_db]
-    earliest = milliseconds_to_timestamp(min(all_ms)) if all_ms else None
-    latest = milliseconds_to_timestamp(max(all_ms)) if all_ms else None
-    coverage_days = 0.0
-    if all_ms:
-        coverage_days = round((max(all_ms) - min(all_ms)) / (MILLISECONDS_PER_SECOND * 86400), 6)
-    total_in_db = len(all_ms)
+    # 覆盖区间 / 缺失区间 / 缺失根数：以**库中实际持久化的数据**为准（复用 quality 模块）
+    rows_in_db = klines.list_klines(symbol_id, timeframe) if symbol_id is not None else []
+    stored = analyze_klines(
+        rows_in_db, timeframe, start_timestamp=requested_start, end_timestamp=fetch_end
+    )
+    gap_ranges = tuple(stored.gap_ranges)
+    missing_intervals = stored.missing_intervals
+    earliest = stored.first_timestamp
+    latest = stored.last_timestamp
+    coverage_days = stored.coverage_days
+    total_in_db = len(rows_in_db)
 
     warnings: list[str] = []
     if counters["fetched"] == 0 and total_in_db == 0:
@@ -669,7 +659,7 @@ def backfill_okx_klines(
         written=written,
         new_records=total_in_db - before,
         total_in_db=total_in_db,
-        gap_ranges=tuple((milliseconds_to_timestamp(a), milliseconds_to_timestamp(b), c) for a, b, c in merged_gaps),
+        gap_ranges=gap_ranges,
         missing_intervals=missing_intervals,
         coverage_days=coverage_days,
         skipped_groups=holder["skipped_groups"],
@@ -681,7 +671,7 @@ def backfill_okx_klines(
 
 
 def _merge_gaps(gaps: list[tuple[int, int, int]]) -> list[tuple[int, int, int]]:
-    """合并相邻 / 重叠的缺口区间（按起点排序后依次合并）。"""
+    """（保留）合并相邻 / 重叠的缺口区间；当前缺口由 quality.analyze_klines 直接给出。"""
     if not gaps:
         return []
     ordered = sorted(gaps, key=lambda item: item[0])

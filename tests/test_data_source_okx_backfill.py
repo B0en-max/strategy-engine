@@ -41,6 +41,7 @@ from data_source import (  # noqa: E402
     backfill_matrix,
     backfill_okx_klines,
     collect_okx_klines,
+    milliseconds_to_timestamp,
     timeframe_plan,
 )
 from data_source import okx as okx_module  # noqa: E402
@@ -299,6 +300,25 @@ class FullHistoryTest(BackfillTestCase):
 
 
 # --------------------------------------------------------------------------- §4 冲突
+# --------------------------------------------------------------------------- §5 多页缺口回归
+class MultiPageGapTest(BackfillTestCase):
+    """回归：多页回补时**页边界不得被误判成缺口**（Stage 032.2 真实回补时发现并修复）。"""
+
+    def test_page_boundaries_are_not_gaps(self) -> None:
+        bars = series(250)
+        del bars[120:123]  # 中间挖掉 3 根
+        report = self.backfill(bars, timeframe="1h", source_kwargs={"page_limit": 100})
+        payload = report.to_dict()
+        self.assertEqual(payload["pages"], 3)
+        self.assertEqual(payload["total_in_db"], 247)
+        self.assertEqual(payload["missing_intervals"], 3)
+        self.assertEqual(len(payload["gap_ranges"]), 1)
+        first, last, count = payload["gap_ranges"][0]
+        self.assertEqual(count, 3)
+        self.assertEqual(first, milliseconds_to_timestamp(START_MS + 120 * HOUR_MS))
+        self.assertEqual(last, milliseconds_to_timestamp(START_MS + 122 * HOUR_MS))
+
+
 class ConflictTest(BackfillTestCase):
     def _seed(self, close: float) -> None:
         symbol_id = SymbolRepository(self.db_path).create_symbol(
